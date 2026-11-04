@@ -6,11 +6,14 @@ tanto comprobantes **recibidos** como **emitidos**.
 ## Caracteristicas
 
 ### Comprobantes emitidos
-- **PDF + XML**: El RIDE se descarga de la pagina; el XML (que el SRI no ofrece como link)
-  se obtiene del web service publico de autorizacion usando la clave de acceso
+- **PDF + XML**: El RIDE se descarga con una peticion directa a la pagina (el envio
+  del formulario del SRI responde 503 en emitidos); el XML (que el SRI no ofrece
+  como link) se obtiene del web service publico de autorizacion usando la clave de acceso
 - **Descarga por dia o mes completo**: El formulario del SRI consulta un solo dia;
   en modo mes la extension itera dia por dia automaticamente (hasta un dia antes
-  del actual), saltando los dias sin comprobantes
+  del actual), saltando los dias sin comprobantes. Antes de cada consulta vuelve a
+  la pagina 1 de la tabla y detecta los errores del servidor al instante (sin esto
+  el SRI rompe la sesion de consulta y solo se descargaba el primer dia)
 - **Consulta automatica**: Al navegar a emitidos desde el menu, consulta sola
   (no hay captcha); no hace falta ejecutar la consulta manualmente
 - **Tema verde agua**: Todo el popup cambia de color al trabajar sobre emitidos
@@ -175,6 +178,11 @@ Los valores se pueden ajustar desde la pestana **Configuracion** del popup, o di
 ### La extension no aparece
 - Verifica que el Modo de desarrollador esta activado
 - Intenta recargar la extension desde `chrome://extensions/`
+
+### En emitidos (mes completo) aparece "El SRI respondio con error" o "La tabla no se actualizo"
+- La sesion de consulta del SRI quedo en un estado invalido; recarga la pagina de
+  emitidos (F5 o el boton "Descargar emitidos" del menu) y vuelve a lanzar el mes.
+  Los dias ya descargados se omiten por el historial
 
 ### Muchas descargas fallidas
 - El servidor del SRI puede estar lento; los reintentos automaticos ayudan

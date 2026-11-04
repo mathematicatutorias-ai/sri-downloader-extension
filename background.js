@@ -38,12 +38,13 @@ let pendingDownload = { resolver: null, timestamp: null, docMetadata: null, tipo
 // Map de metadata por downloadId para onDeterminingFilename
 let downloadMetadataMap = new Map();
 
-// Metadata pendiente del XML de emitidos descargado via web service (data URL
-// iniciada por la propia extension con chrome.downloads.download). Esa descarga
-// no pasa por onCreated/pendingDownload, asi que se consume directamente en
+// Metadata pendiente de una descarga iniciada por la propia extension con
+// chrome.downloads.download sobre un data URL (XML de emitidos obtenido del
+// web service, PDF de emitidos obtenido por fetch). Esa descarga no pasa por
+// onCreated/pendingDownload, asi que se consume directamente en
 // onDeterminingFilename para decidir la ruta. Las descargas son secuenciales:
 // a lo sumo hay una pendiente a la vez.
-let pendingWsXmlMeta = null;
+let pendingDataUrlMeta = null;
 
 chrome.downloads.onCreated.addListener((downloadItem) => {
   if (!pendingDownload.resolver || !pendingDownload.timestamp) return;
@@ -76,12 +77,13 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
   let meta = downloadMetadataMap.get(downloadItem.id);
   let esWsXml = false;
 
-  // XML de emitidos descargado por la extension via data URL: el filename
-  // pasado a chrome.downloads.download NO sobrevive a este listener (cualquier
-  // suggest con nombre lo pisa), asi que la ruta definitiva se decide aqui
-  if (!meta && pendingWsXmlMeta && downloadItem.url?.startsWith('data:')) {
-    meta = pendingWsXmlMeta;
-    pendingWsXmlMeta = null;
+  // Descarga por data URL iniciada por la extension (XML del WS o PDF por
+  // fetch): el filename pasado a chrome.downloads.download NO sobrevive a
+  // este listener (cualquier suggest con nombre lo pisa), asi que la ruta
+  // definitiva se decide aqui
+  if (!meta && pendingDataUrlMeta && downloadItem.url?.startsWith('data:')) {
+    meta = pendingDataUrlMeta;
+    pendingDataUrlMeta = null;
     esWsXml = true;
   }
 
@@ -523,10 +525,24 @@ function desescaparXml(s) {
  * @returns {string} data URL descargable
  */
 function xmlADataUrl(xml) {
-  const bytes = new TextEncoder().encode(xml);
+  return bytesADataUrl(new TextEncoder().encode(xml), 'application/xml');
+}
+
+/**
+ * Convierte bytes a data URL base64 (el service worker MV3 no tiene
+ * URL.createObjectURL). Se concatena por bloques para no desbordar la pila
+ * con String.fromCharCode(...bytes) en archivos grandes.
+ * @param {Uint8Array} bytes - Contenido binario
+ * @param {string} mime - Content-Type del data URL
+ * @returns {string} data URL
+ */
+function bytesADataUrl(bytes, mime) {
   let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return 'data:application/xml;base64,' + btoa(bin);
+  const BLOQUE = 0x8000;
+  for (let i = 0; i < bytes.length; i += BLOQUE) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + BLOQUE));
+  }
+  return 'data:' + mime + ';base64,' + btoa(bin);
 }
 
 /**
@@ -590,8 +606,8 @@ async function descargarXmlEmitido(claveAcceso, docMetadata) {
     // La ruta organizada NO se pasa aqui como filename: nuestro propio
     // listener de onDeterminingFilename la pisaria (un suggest con nombre
     // anula el filename de downloads.download). La ruta se decide en el
-    // listener via pendingWsXmlMeta; este filename queda solo de respaldo.
-    pendingWsXmlMeta = { docMetadata: meta, tipoArchivo: 'xml' };
+    // listener via pendingDataUrlMeta; este filename queda solo de respaldo.
+    pendingDataUrlMeta = { docMetadata: meta, tipoArchivo: 'xml' };
     await chrome.downloads.download({
       url,
       filename: `${claveAcceso}.xml`,
@@ -599,9 +615,91 @@ async function descargarXmlEmitido(claveAcceso, docMetadata) {
     });
     return true;
   } catch (e) {
-    pendingWsXmlMeta = null;
+    pendingDataUrlMeta = null;
     return false;
   }
+}
+
+/**
+ * Descarga el PDF/RIDE de un emitido haciendo el POST JSF del link con fetch
+ * desde la pagina (misma sesion y cookies) en vez de enviar el formulario con
+ * mojarra.jsfcljs. Verificado en vivo (2026-11): en emitidos el submit del
+ * formulario (incluso el click manual en RIDE) responde 503, mientras que el
+ * mismo POST por fetch devuelve el PDF en ~100 ms. Ademas evita depender de
+ * la ventana de tiempo de downloads.onCreated (5 s de timeout por intento).
+ * Si la respuesta no es un PDF (sesion caida, pantalla distinta), devuelve
+ * false y el llamador decide si cae al metodo clasico.
+ * @param {number} tabId - Tab del SRI
+ * @param {string} linkId - ID del link JSF del PDF (...:lnkPdf)
+ * @param {Object} docMetadata - Metadata para organizar/nombrar el archivo
+ * @returns {Promise<boolean>} true si se disparo la descarga
+ */
+async function descargarPdfEmitidoPorFetch(tabId, linkId, docMetadata) {
+  try {
+    const r = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: async (linkId, timeoutMs) => {
+        const form = document.getElementById('frmPrincipal');
+        if (!form || !document.getElementById(linkId)) return { ok: false, error: 'sin-form-o-link' };
+        // Mismos campos que enviaria mojarra.jsfcljs: el formulario completo
+        // (incluye javax.faces.ViewState) + el id del link como parametro
+        const fd = new FormData(form);
+        fd.append(linkId, linkId);
+        const resp = await fetch(form.action || location.href, {
+          method: 'POST',
+          body: new URLSearchParams([...fd]),
+          credentials: 'include',
+          signal: AbortSignal.timeout(timeoutMs)
+        });
+        const ct = resp.headers.get('content-type') || '';
+        if (!resp.ok || !ct.includes('pdf')) return { ok: false, error: `status ${resp.status} ${ct}` };
+        const bytes = new Uint8Array(await resp.arrayBuffer());
+        if (bytes.length === 0) return { ok: false, error: 'pdf-vacio' };
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        }
+        return { ok: true, base64: btoa(bin) };
+      },
+      args: [linkId, SRI_CONFIG.TIMEOUT_WS]
+    });
+    const res = r[0]?.result;
+    if (!res?.ok) return false;
+
+    const meta = { ...docMetadata, rucUsuario: estadoDescarga.rucUsuario };
+    // Igual que el XML del WS: la ruta final la decide onDeterminingFilename
+    pendingDataUrlMeta = { docMetadata: meta, tipoArchivo: 'pdf' };
+    await chrome.downloads.download({
+      url: 'data:application/pdf;base64,' + res.base64,
+      filename: `${docMetadata.claveAcceso}.pdf`,
+      conflictAction: 'uniquify'
+    });
+    return true;
+  } catch (e) {
+    pendingDataUrlMeta = null;
+    return false;
+  }
+}
+
+/**
+ * PDF de emitidos con reintentos: primero por fetch; si en todos los intentos
+ * el servidor no entrega un PDF, cae al metodo clasico (mojarra/click) por
+ * compatibilidad, que a su vez tiene sus propios reintentos.
+ * @param {number} tabId - Tab del SRI
+ * @param {string} linkId - ID del link JSF del PDF
+ * @param {Object} docMetadata - Metadata del documento
+ * @returns {Promise<boolean>} true si se disparo la descarga
+ */
+async function descargarPdfEmitidoConReintento(tabId, linkId, docMetadata) {
+  for (let intento = 0; intento <= SRI_CONFIG.MAX_REINTENTOS; intento++) {
+    const exito = await descargarPdfEmitidoPorFetch(tabId, linkId, docMetadata);
+    if (exito) return true;
+    if (estadoDescarga.detenido) return false;
+    if (intento < SRI_CONFIG.MAX_REINTENTOS) {
+      await delay(SRI_CONFIG.DELAY_REINTENTO);
+    }
+  }
+  return ejecutarConReintento(tabId, linkId, docMetadata, 'pdf');
 }
 
 /**
@@ -1053,9 +1151,12 @@ async function procesarDocumento(tabId, doc, tipoDescarga, pagina, origen = 'rec
       await delay(SRI_CONFIG.DELAY_DESCARGA);
     }
 
-    // Descargar PDF con reintentos
+    // Descargar PDF con reintentos. En emitidos el submit del formulario
+    // responde 503 (ver descargarPdfEmitidoPorFetch): se usa fetch
     if (intentaPdf) {
-      exitoPdf = await ejecutarConReintento(tabId, doc.linkPdfId, docMeta, 'pdf');
+      exitoPdf = esEmitidos
+        ? await descargarPdfEmitidoConReintento(tabId, doc.linkPdfId, docMeta)
+        : await ejecutarConReintento(tabId, doc.linkPdfId, docMeta, 'pdf');
       if (!exitoPdf) errorMsg = errorMsg ? 'Error descargando XML y PDF' : 'Error descargando PDF';
       await delay(SRI_CONFIG.DELAY_DESCARGA);
     }
@@ -1236,7 +1337,7 @@ async function descargarTodasLasPaginas(tabId, tipoDescarga, ignorarHistorial = 
 
   // Limpiar metadata map
   downloadMetadataMap.clear();
-  pendingWsXmlMeta = null;
+  pendingDataUrlMeta = null;
 
   estadoDescarga.activo = false;
   estadoDescarga.tiempoEstimado = null;
@@ -1312,7 +1413,7 @@ async function descargarSeleccionados(tabId, tipoDescarga, claves, origen = 'rec
 
   await guardarBufferAlStorage(true);
   downloadMetadataMap.clear();
-  pendingWsXmlMeta = null;
+  pendingDataUrlMeta = null;
 
   estadoDescarga.activo = false;
   estadoDescarga.tiempoEstimado = null;
@@ -1347,6 +1448,29 @@ function setearFechaYConsultar(tabId, fechaStr) {
       const btn = document.querySelector(selectores.EMITIDOS_BTN_CONSULTAR);
       if (!inp || !btn) return false;
 
+      // Hook (una sola vez) sobre XMLHttpRequest para detectar respuestas de
+      // error (JSF <partial-response><error> o HTTP 4xx/5xx): PrimeFaces no las refleja
+      // en el DOM (la tabla queda igual y el dialogo "Espere por favor" se
+      // queda abierto), asi que sin esto solo se detectarian por timeout.
+      // Se publica en un atributo del <html> para que el poll, que corre en
+      // el mundo aislado, pueda leerlo.
+      if (!window.__sriXhrHook) {
+        window.__sriXhrHook = true;
+        const sendOriginal = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.send = function () {
+          this.addEventListener('loadend', () => {
+            // Error JSF (partial-response con <error>) o HTTP de error (500,
+            // 503...): en ambos casos PrimeFaces no actualiza la tabla
+            const txt = this.responseText || '';
+            const m = txt.match(/<partial-response>\s*<error>\s*<error-name>([^<]*)<\/error-name>/);
+            const err = m ? m[1].trim() : (this.status >= 400 ? 'HTTP ' + this.status : null);
+            if (err) document.documentElement.setAttribute('data-sri-ajax-error', err);
+          });
+          return sendOriginal.apply(this, arguments);
+        };
+      }
+      document.documentElement.removeAttribute('data-sri-ajax-error');
+
       inp.value = fecha;
       inp.dispatchEvent(new Event('change', { bubbles: true }));
 
@@ -1368,37 +1492,61 @@ function setearFechaYConsultar(tabId, fechaStr) {
  * Espera (polling cada 500ms) a que el AJAX de la consulta de emitidos
  * termine, detectado por la desaparicion del atributo marcador
  * data-sri-esperando en la tabla o en el contenedor de mensajes
- * (ver setearFechaYConsultar).
+ * (ver setearFechaYConsultar), o por el atributo data-sri-ajax-error que
+ * deja el hook de XHR cuando JSF responde con error.
  * @param {number} tabId - Tab del SRI
- * @returns {Promise<'datos'|'vacio'|'timeout'>} 'datos' si hay tabla nueva,
- *   'vacio' si el SRI respondio "No existen datos", 'timeout' si no se supo
- *   (tambien al detener manualmente, para salir del bucle de inmediato)
+ * @returns {Promise<{resultado: 'datos'|'vacio'|'error'|'timeout', detalle?: string}>}
+ *   'datos' si hay tabla nueva, 'vacio' si el SRI respondio "No existen
+ *   datos", 'error' si JSF devolvio un error (detalle = nombre de la
+ *   excepcion), 'timeout' si no se supo (tambien al detener manualmente,
+ *   para salir del bucle de inmediato)
  */
 async function esperarResultadosEmitidos(tabId) {
   const inicio = Date.now();
   while (Date.now() - inicio < SRI_CONFIG.TIMEOUT_PAGINA) {
     // Responder de inmediato al boton Detener
-    if (estadoDescarga.detenido) return 'timeout';
+    if (estadoDescarga.detenido) return { resultado: 'timeout' };
     try {
       const r = await chrome.scripting.executeScript({
         target: { tabId: tabId },
         func: (selectores) => {
+          const err = document.documentElement.getAttribute('data-sri-ajax-error');
+          if (err) return { resultado: 'error', detalle: err };
           const tabla = document.querySelector(selectores.TABLA_EMITIDOS);
-          if (tabla && !tabla.hasAttribute('data-sri-esperando')) return 'datos';
+          if (tabla && !tabla.hasAttribute('data-sri-esperando')) return { resultado: 'datos' };
           // Dia sin comprobantes: mensaje nuevo (sin marcador) "No existen datos"
           const msgs = document.querySelector('.ui-messages');
-          if (msgs && !msgs.hasAttribute('data-sri-esperando') && /No existen datos/i.test(msgs.textContent)) return 'vacio';
+          if (msgs && !msgs.hasAttribute('data-sri-esperando') && /No existen datos/i.test(msgs.textContent)) return { resultado: 'vacio' };
           return null;
         },
         args: [SRI_CONFIG.SELECTORES]
       });
-      if (r[0]?.result === 'datos' || r[0]?.result === 'vacio') return r[0].result;
+      if (r[0]?.result) return r[0].result;
     } catch (e) {
       // Tab ocupada o navegando; reintentar
     }
     await delay(500);
   }
-  return 'timeout';
+  return { resultado: 'timeout' };
+}
+
+/**
+ * Lleva la tabla de emitidos a la pagina 1 si esta en otra. OBLIGATORIO
+ * antes de consultar otro dia: verificado en vivo (2026-11), si se pulsa
+ * Consultar con el paginador en una pagina distinta de la 1, el SRI responde
+ * ArithmeticException y la vista JSF queda inservible (todas las peticiones
+ * siguientes, incluso paginar, devuelven el mismo error hasta recargar la
+ * pagina). Como cada dia se procesa hasta su ultima pagina, sin esto solo
+ * se descargaba el primer dia del mes.
+ * @param {number} tabId - Tab del SRI
+ * @returns {Promise<boolean>} false si habia paginador en otra pagina y no se
+ *   logro volver a la 1
+ */
+async function asegurarPrimeraPaginaEmitidos(tabId) {
+  const datos = await obtenerDatosPagina(tabId, 'emitidos');
+  if (datos.error || !datos.paginacion || datos.paginacion.actual <= 1) return true;
+  await navegarPrimera(tabId);
+  return esperarCambioPagina(tabId, 1, 'emitidos');
 }
 
 /**
@@ -1494,23 +1642,48 @@ async function descargarEmitidosMes(tabId, tipoDescarga, ignorarHistorial, anio,
 
     const fechaStr = `${String(dia).padStart(2, '0')}/${String(mes).padStart(2, '0')}/${anio}`;
 
+    // La consulta anterior dejo la tabla en su ultima pagina: volver a la 1
+    // antes de consultar, si no el SRI rompe la vista (ver la funcion)
+    if (!(await asegurarPrimeraPaginaEmitidos(tabId))) {
+      if (estadoDescarga.detenido) break;
+      estadoDescarga.error = `No se pudo volver a la pagina 1 antes de consultar el dia ${fechaStr}.`;
+      break;
+    }
+
     const consultado = await setearFechaYConsultar(tabId, fechaStr);
     if (!consultado) {
       estadoDescarga.error = `No se pudo consultar el dia ${fechaStr}. Verifica estar en la pantalla de emitidos.`;
       break;
     }
 
-    const resultado = await esperarResultadosEmitidos(tabId);
+    const { resultado, detalle } = await esperarResultadosEmitidos(tabId);
     if (estadoDescarga.detenido) break;
 
     // Dia sin comprobantes (mensaje "No existen datos" detectado): siguiente dia
     if (resultado === 'vacio') continue;
+
+    // JSF respondio con error: la vista queda rota, no tiene sentido seguir
+    // (procesar la tabla vieja solo produciria "omitidos" falsos)
+    if (resultado === 'error') {
+      estadoDescarga.error = `El SRI respondio con error al consultar el dia ${fechaStr} (${detalle}). Recarga la pagina de emitidos y vuelve a intentar.`;
+      break;
+    }
 
     // Timeout: dar margen extra; si el SRI muestra "No existen datos", saltar
     if (resultado === 'timeout') {
       await delay(SRI_CONFIG.DELAY_PAGINA);
       if (estadoDescarga.detenido) break;
       if (await verificarSinDatosEmitidos(tabId)) continue;
+    }
+
+    // Verificar que la tabla en pantalla corresponde al dia consultado: si la
+    // consulta no llego a actualizarla (timeout real), procesarla descargaria
+    // o marcaria como omitidos los documentos del dia anterior
+    const datosDia = await obtenerDatosPagina(tabId, 'emitidos');
+    const fechaEnTabla = datosDia.documentos?.[0]?.fechaEmision;
+    if (!datosDia.error && fechaEnTabla && fechaEnTabla !== fechaStr) {
+      estadoDescarga.error = `La tabla no se actualizo al consultar el dia ${fechaStr} (muestra ${fechaEnTabla}). Recarga la pagina de emitidos y vuelve a intentar.`;
+      break;
     }
 
     const error = await procesarPaginasActuales(tabId, tipoDescarga, 'emitidos');
@@ -1532,7 +1705,7 @@ async function descargarEmitidosMes(tabId, tipoDescarga, ignorarHistorial, anio,
 
   await guardarBufferAlStorage(true);
   downloadMetadataMap.clear();
-  pendingWsXmlMeta = null;
+  pendingDataUrlMeta = null;
 
   estadoDescarga.activo = false;
   estadoDescarga.tiempoEstimado = null;

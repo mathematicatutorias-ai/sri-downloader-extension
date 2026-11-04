@@ -4,7 +4,7 @@
 Extension de Chrome (Manifest V3) para descargar documentos XML/PDF del SRI Ecuador,
 tanto comprobantes RECIBIDOS como EMITIDOS. Organiza archivos en carpetas
 configurables y ofrece accesos directos al portal SRI.
-Version: 1.5.1 | Dominio: `srienlinea.sri.gob.ec` (+ WS `cel.sri.gob.ec`)
+Version: 1.5.2 | Dominio: `srienlinea.sri.gob.ec` (+ WS `cel.sri.gob.ec`)
 
 ## Estructura de archivos
 ```
@@ -65,6 +65,9 @@ sri-downloader-extension/
 - Funciones auxiliares: `sanitizarNombreCarpeta`, `parsearFechaSRI`, `limpiarTipoDoc`, `construirNombreArchivo`, `construirRutaArchivo`
 - `conflictAction: 'overwrite'` para sobrescribir archivos existentes
 - Si deshabilitado, `suggest()` sin parametros = carpeta de descargas por defecto
+- Descargas por data URL iniciadas por la extension (XML del WS y PDF por
+  fetch en emitidos) no pasan por `onCreated`: su metadata viaja en
+  `pendingDataUrlMeta` y el listener la consume al detectar URL `data:`
 
 ### Navegacion SRI (background.js)
 - Mensaje `navegarYSetearDia`: navega a comprobantes recibidos y setea automaticamente:
@@ -79,22 +82,39 @@ sri-downloader-extension/
 
 ### Comprobantes emitidos (background.js)
 - Pantalla: `recuperarComprobantes.jsf`, tabla `frmPrincipal:tablaCompEmitidos_data`
-- Por fila SOLO hay link de PDF/RIDE (`lnkPdf`, mojarra.jsfcljs). NO existe `lnkXml`
+- Por fila SOLO hay link de PDF/RIDE (`lnkPdf`). NO existe `lnkXml`
+- **PDF via fetch** (`descargarPdfEmitidoPorFetch`): el submit del formulario con
+  `mojarra.jsfcljs` (y hasta el click manual en RIDE) responde 503 en emitidos;
+  el mismo POST (FormData del form + `linkId=linkId`) hecho con `fetch` desde
+  la pagina devuelve el PDF en ~100 ms. Se convierte a data URL y se descarga
+  con `chrome.downloads.download`; la ruta la decide `onDeterminingFilename`
+  via `pendingDataUrlMeta` (mismo mecanismo que el XML del WS). Si en todos
+  los intentos no llega un PDF, cae al metodo clasico (mojarra/click)
 - **XML via web service**: `consultarXmlAutorizado` hace SOAP al WS publico
   `AutorizacionComprobantesOffline` (cel/celcer.sri.gob.ec) con la clave de acceso;
   el XML viene escapado con entidades dentro de `<comprobante>` → `desescaparXml`
   → `xmlADataUrl` (base64, el SW no tiene URL.createObjectURL) → `chrome.downloads.download`.
   La ruta organizada NO se pasa como `filename` ahi (el propio listener
-  `onDeterminingFilename` la pisaria): se registra en `pendingWsXmlMeta` y el
+  `onDeterminingFilename` la pisaria): se registra en `pendingDataUrlMeta` y el
   listener decide la ruta final
 - El formulario consulta UN SOLO DIA (sin rango ni "Todos"):
   - Modo dia: descarga lo consultado en pantalla (flujo normal de paginas)
   - Modo mes (`descargarEmitidosMes`): itera del dia 1 hasta UN DIA ANTES de hoy
     (consultar el dia actual da error), seteando fecha + click Consultar
     (`frmPrincipal:btnConsultar`) por cada dia
+- **Antes de consultar cada dia hay que estar en la pagina 1 de la tabla**
+  (`asegurarPrimeraPaginaEmitidos`): consultar con el paginador en otra pagina
+  hace que el SRI responda HTTP 500 / `ArithmeticException` y deje la vista
+  JSF rota (todo lo que sigue falla hasta recargar). Ver "Problemas conocidos"
 - Deteccion de fin de AJAX: se marca la tabla y `.ui-messages` con atributo
   `data-sri-esperando` antes del click; el poll (`esperarResultadosEmitidos`)
-  devuelve 'datos' | 'vacio' ("No existen datos...") | 'timeout'
+  devuelve `{resultado: 'datos'|'vacio'|'error'|'timeout', detalle?}`.
+  'error' sale de un hook sobre `XMLHttpRequest.send` (instalado en MAIN por
+  `setearFechaYConsultar`) que publica en `<html data-sri-ajax-error>` las
+  respuestas JSF `<partial-response><error>` o HTTP >= 400; en ese caso el
+  mes aborta con mensaje en vez de procesar la tabla vieja
+- Tras la espera se verifica que la fecha de emision de la primera fila
+  coincide con el dia consultado; si no, aborta (tabla desactualizada)
 - Dias sin comprobantes se SALTAN (solo si el mensaje "No existen datos" esta
   presente; otros errores abortan para no enmascararlos)
 - Cancelacion: `estadoDescarga.detenido` se consulta en todos los bucles de espera
@@ -320,7 +340,7 @@ document.getElementById(linkId).click();
   nombre (lo pisa). La descarga por data URL no pasa por `onCreated`, no habia
   metadata en `downloadMetadataMap` y el listener caia en la rama de "descarga
   ajena" sugiriendo el nombre generico del data URL en la raiz de Descargas.
-- **Solucion**: `descargarXmlEmitido` registra la metadata en `pendingWsXmlMeta`
+- **Solucion**: `descargarXmlEmitido` registra la metadata en `pendingDataUrlMeta`
   antes de llamar `downloads.download`; el listener la consume (detecta URL
   `data:`) y construye la ruta organizada, o el nombre `claveAcceso.xml` si la
   organizacion esta deshabilitada.
@@ -335,6 +355,25 @@ document.getElementById(linkId).click();
   incompleta si el usuario estaba parado en la ultima
 - **Solucion**: `procesarPaginasActuales` navega primero a la pagina 1 y recien
   ahi mide `docsPorPagina`
+
+### Modo mes de emitidos solo descargaba el primer dia (y tardaba mucho)
+- **Causa 1** (verificada en vivo 2026-11): tras procesar el dia 1 la tabla
+  queda en su ultima pagina. Pulsar Consultar con el paginador en una pagina
+  distinta de la 1 hace que el SRI responda HTTP 500 / `ArithmeticException`
+  y la vista JSF queda rota: todas las peticiones siguientes (incluso volver
+  a la pagina 1) fallan hasta recargar. PrimeFaces no refleja el error en el
+  DOM, asi que cada dia agotaba `TIMEOUT_PAGINA` (10 s) + `DELAY_PAGINA` y
+  luego procesaba la tabla vieja (todo "omitido" por dedup).
+- **Causa 2**: en emitidos el submit del formulario para el PDF (mojarra
+  o click) responde 503, asi que cada PDF costaba 3 intentos x 5 s de
+  timeout y terminaba fallido; el mismo POST por `fetch` funciona.
+- **Solucion**: `asegurarPrimeraPaginaEmitidos` antes de cada consulta;
+  hook de XHR que detecta errores JSF/HTTP y aborta con mensaje claro;
+  verificacion de que la tabla muestra el dia consultado; PDF de emitidos
+  via `descargarPdfEmitidoPorFetch`. Con esto 6 dias se consultan en ~1 s.
+- Nota: la URL directa `recuperarComprobantes.jsf` SI funciona cuando la
+  sesion de la app JSF ya fue inicializada (via accederAplicacion); solo
+  rebota al login si no lo fue.
 
 ### La carpeta anio/mes de recibidos usaba la fecha de autorizacion
 - **Causa**: `obtenerDatosPagina` tomaba `celdas[4]` como fecha de emision y
