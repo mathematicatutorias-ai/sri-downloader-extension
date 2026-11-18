@@ -20,7 +20,10 @@ var SRI_CONFIG = {
   MAX_REINTENTOS: 2,         // reintentos por descarga fallida
 
   // Historial
-  DIAS_HISTORIAL: 30,        // dias antes de limpiar historial automaticamente
+  DIAS_HISTORIAL: 90,        // dias antes de limpiar historial automaticamente (~3 meses)
+
+  // Metodo de descarga por link de la pagina: 'mojarra' (JSF directo) o 'click'
+  METODO_DESCARGA: 'mojarra',
 
   // Selectores CSS del DOM del portal SRI
   SELECTORES: {
@@ -38,18 +41,32 @@ var SRI_CONFIG = {
     EMITIDOS_BTN_CONSULTAR: '#frmPrincipal\\:btnConsultar',     // boton Consultar (verificado en vivo)
   },
 
+  // Tipos de comprobante del formulario de emitidos (value del select ->
+  // nombre). Los usa el modo mes con "todos los tipos"
+  TIPOS_EMITIDOS: {
+    '1': 'Facturas',
+    '2': 'Liquidaciones de compra',
+    '3': 'Notas de Credito',
+    '4': 'Notas de Debito',
+    '5': 'Guias de Remision',
+    '6': 'Comprobantes de Retencion',
+  },
+
   // Web service publico de autorizacion del SRI: entrega el XML autorizado a
   // partir de la clave de acceso. Usado para el XML de emitidos (que no tiene
-  // link de descarga directa). Ambiente 2 = produccion (cel), 1 = pruebas (celcer).
+  // link de descarga directa). Solo PRODUCCION: el portal donde se consulta
+  // es el de produccion, nunca se busca en el ambiente de pruebas.
   WS_AUTORIZACION: {
     PRODUCCION: 'https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline',
-    PRUEBAS: 'https://celcer.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline',
     NAMESPACE: 'http://ec.gob.sri.ws.autorizacion',
   },
 
   // Asistente de devolucion de IVA (personas con discapacidad). Lo usa iva.js
   // (panel flotante en la pagina); no interviene en las descargas.
   IVA: {
+    // App de devoluciones (adultos mayores y discapacidad): iva.js solo se
+    // carga en estas paginas (ver content_scripts del manifest)
+    RUTA_APP: '/devolucionTerceraEdad-internet/',
     TABLA_FACTURAS: "[id$='tblFacturas_data']",                 // tbody de la tabla de facturas
     INPUT_IVA_SOLICITADO: "input[id$='txtIvaSolicitado']",     // input "IVA solicitado" por fila
     SELECT_TIPO_GASTO: "select[id$='cmbTipoGasto_input']",     // select oculto del SelectOneMenu PrimeFaces
@@ -74,6 +91,23 @@ var SRI_CONFIG = {
     ORDEN: 'ruc_fecha',            // 'ruc_fecha' | 'fecha_ruc'
     FORMATO_NOMBRE: 'claveAcceso', // 'claveAcceso' | 'ruc_serie' | 'razon_serie'
   },
+};
+
+/**
+ * Normaliza la carpeta raiz de la organizacion a una ruta relativa valida
+ * para chrome.downloads (que rechaza rutas absolutas, ".." y caracteres
+ * invalidos: el archivo caia en Descargas sin avisar). Admite subcarpetas
+ * separadas por / o \. Compartida por popup (al guardar) y background.
+ * @param {string} raiz - Texto ingresado por el usuario
+ * @returns {string} Ruta relativa segura (nunca vacia)
+ */
+var sriNormalizarCarpetaRaiz = function (raiz) {
+  const segmentos = String(raiz || '')
+    .split(/[\\/]+/)
+    .map(s => s.replace(/[:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, ''))
+    .filter(s => s && s !== '_' && !/^[a-zA-Z]_$/.test(s))
+    .map(s => s.substring(0, 100));
+  return segmentos.join('/') || 'descargas_sri';
 };
 
 } // Fin guard SRI_CONFIG

@@ -5,7 +5,7 @@ Extension de Chrome (Manifest V3) para descargar documentos XML/PDF del SRI Ecua
 tanto comprobantes RECIBIDOS como EMITIDOS. Organiza archivos en carpetas
 configurables, ofrece accesos directos al portal SRI e incluye un asistente
 para la devolucion de IVA (adultos mayores / personas con discapacidad).
-Version: 1.6.0 | Dominio: `srienlinea.sri.gob.ec` (+ WS `cel.sri.gob.ec`)
+Version: 1.7.0 | Dominio: `srienlinea.sri.gob.ec` (+ WS `cel.sri.gob.ec`)
 
 ## Estructura de archivos
 ```
@@ -21,7 +21,7 @@ sri-downloader-extension/
 ├── popup.js           # Logica del popup (menu SRI, config, organizacion, historial)
 ├── popup.css          # Estilos (light + dark mode + tema verde agua emitidos)
 ├── icons/             # Iconos PNG y SVG (16, 48, 128)
-├── docs/              # Assets de la Chrome Web Store (descripcion + imagenes)
+├── docs/              # Assets de la Chrome Web Store (descripcion + imagenes + mocks/)
 ├── dist/              # ZIPs para publicar (gitignored, se regeneran)
 ├── README.md
 └── CLAUDE.md
@@ -47,11 +47,12 @@ sri-downloader-extension/
 - **Doble metodo de descarga**: `mojarra.jsfcljs()` (directo JSF) o click emulado
 - Ejecuta descargas con `chrome.scripting.executeScript({ world: 'MAIN' })`
 - Verifica descargas reales con `chrome.downloads.onCreated` (ventana de tiempo)
-- Auto-acepta descargas "peligrosas" del SRI con `chrome.downloads.acceptDanger`
+- Intenta aceptar descargas "peligrosas" del SRI con `chrome.downloads.acceptDanger`
+  (solo un intento: Chrome exige contexto visible y desde el service worker suele rechazar)
 - Guarda historial en `chrome.storage.local` (organizado por RUC)
 - Enfoque **secuencial**: espera confirmacion de descarga antes de continuar
 - Buffer en memoria durante sesion, escribe a storage al finalizar
-- Limpieza automatica de historial >30 dias
+- Limpieza automatica de historial >90 dias (`DIAS_HISTORIAL`, configurable)
 - Indice Set() para deduplicacion O(1) (distingue XML y PDF por separado)
 - Reintentos automaticos (configurable, default 2)
 - Espera inteligente de paginacion (polling en vez de delay fijo)
@@ -87,7 +88,7 @@ sri-downloader-extension/
 ### Comprobantes emitidos (background.js)
 - Pantalla: `recuperarComprobantes.jsf`, tabla `frmPrincipal:tablaCompEmitidos_data`
 - Por fila SOLO hay link de PDF/RIDE (`lnkPdf`). NO existe `lnkXml`
-- **PDF via fetch** (`descargarPdfEmitidoPorFetch`): el submit del formulario con
+- **PDF via fetch** (`descargarPorFetch`): el submit del formulario con
   `mojarra.jsfcljs` (y hasta el click manual en RIDE) responde 503 en emitidos;
   el mismo POST (FormData del form + `linkId=linkId`) hecho con `fetch` desde
   la pagina devuelve el PDF en ~100 ms. Se convierte a data URL y se descarga
@@ -95,7 +96,7 @@ sri-downloader-extension/
   via `pendingDataUrlMeta` (mismo mecanismo que el XML del WS). Si en todos
   los intentos no llega un PDF, cae al metodo clasico (mojarra/click)
 - **XML via web service**: `consultarXmlAutorizado` hace SOAP al WS publico
-  `AutorizacionComprobantesOffline` (cel/celcer.sri.gob.ec) con la clave de acceso;
+  `AutorizacionComprobantesOffline` (cel.sri.gob.ec, SOLO produccion) con la clave de acceso;
   el XML viene escapado con entidades dentro de `<comprobante>` → `desescaparXml`
   → `xmlADataUrl` (base64, el SW no tiene URL.createObjectURL) → `chrome.downloads.download`.
   La ruta organizada NO se pasa como `filename` ahi (el propio listener
@@ -126,6 +127,32 @@ sri-downloader-extension/
   por descarga total, seleccionados y modo mes; `procesarDocumento` recibe `origen`
 - Ruta de organizacion usa segmento `recibidos|emitidos` segun `metadata.origen`
 - Popup con tema verde agua (`body.modo-emitidos`) cuando trabaja sobre emitidos
+
+### Recibidos: metodo normal + respaldo por fetch
+- Prima el metodo normal (mojarra/click con sus reintentos y confirmacion por
+  `downloads.onCreated`). Solo si falla, `descargarRecibidoConRespaldo` intenta
+  UNA vez `descargarPorFetch` (mismo POST JSF hecho con fetch, validado por
+  contenido: `%PDF` o XML que no sea HTML/partial-response)
+- Cada archivo logrado asi suma `estadoDescarga.viaAlternativa`, deja `nota` en
+  el registro del historial/CSV y genera un aviso al terminar (no verificado en
+  vivo contra el SRI: el aviso pide revisar que el archivo abra)
+
+### Emitidos: todos los tipos de comprobante
+- Casilla "Todos los tipos de comprobante" (solo modo mes; preferencia
+  `emitidosTodosLosTipos`). `descargarEmitidosMes(..., todosLosTipos)` recorre
+  `SRI_CONFIG.TIPOS_EMITIDOS`: por cada tipo setea el select
+  (`setearTipoComprobanteEmitidos`) y repite el mes con `descargarDiasEmitidos`.
+  Un tipo que el select no ofrece se salta. Progreso: `tipoComprobante`,
+  `tipoActual`, `totalTipos`
+
+### Sesiones de descarga (background.js)
+- `crearEstadoSesion` (sincrono, antes de cualquier await: evita doble inicio),
+  `prepararSesion` (buffer, config, limpieza, indice de dedup, marca en
+  `storage.session`) y `finalizarSesion` (avisos, guardado, notificaciones) son
+  comunes a descarga total, seleccionados y modo mes
+- Historial: una clave `hs_<sesionId>` por sesion (ver "Problemas conocidos")
+- Registro por documento: ademas de fechas guarda `valorSinImpuestos`, `iva`,
+  `importeTotal` (columnas de la tabla) y `nota`
 
 ### Popup - `popup.html` / `popup.js` / `popup.css`
 - **4 tabs** en grilla 2x2: Descargar | Historial | Configuracion | Organizacion
@@ -161,7 +188,9 @@ sri-downloader-extension/
 
 ### Asistente devolucion de IVA - `iva.js` / `iva.css` / `iva-categorias.js`
 - Portado de la extension `autofill_devolucioniva` (github.com/rolansor/autofill_devolucioniva)
-- Content script en todas las paginas del SRI (tras config.js + iva-categorias.js);
+- Content script SOLO en `/devolucionTerceraEdad-internet/*` (app de devoluciones:
+  discapacidad en `pages/personasDiscapacidad/...` y adultos mayores en
+  `pages/terceraEdad/procesarDTE.jsf`, verificado en vivo), tras config.js + iva-categorias.js;
   guard `window.SRI_IVA_LOADED`. Selectores en `SRI_CONFIG.IVA`
 - Popup: apartado primario "Devolucion de IVA" (morado) con SOLO dos opciones:
   Personas con discapacidad (`redireccion=130`) y Adultos mayores (`redireccion=129`).
@@ -181,8 +210,14 @@ sri-downloader-extension/
 - Cambio de pagina: marca la primera fila y espera a que se reemplace (o cambie el
   texto del paginador), luego 1500 ms de margen
 - Las categorias personalizadas de la extension vieja NO se migran (otro storage)
-- Probado con tabla simulada; el selector de la tabla en adultos mayores no se ha
-  verificado en vivo (se asume la misma app `devolucionTerceraEdad-internet`)
+- Coincidencia (`coincide`): claves de mas de 4 caracteres por `includes()`;
+  claves cortas ("RM", "AKI", "KFC", "ZARA") solo como palabra completa (antes
+  "RM" coincidia con "HERMANOS" y clasificaba mal). Compara sin tildes
+- Casilla "Procesar automaticamente al terminar el modo auto" (`ivaAutoProcesar`,
+  activada por defecto); desactivada deja todo listo sin enviar
+- Exportar/Importar categorias personalizadas en JSON `{"NOMBRE": "4"}`
+- Probado con tabla simulada (`docs/mocks/iva_page.html`); la tabla real de
+  facturas no se ha visto en vivo (se asumen los selectores de la extension vieja)
 
 ## Mensajes entre componentes
 
@@ -191,7 +226,7 @@ sri-downloader-extension/
 |---------|-------------|---------|
 | `iniciarDescargaTotal` | Inicia descarga de todas las paginas | `{tabId, tipoDescarga, ignorarHistorial, origen}` |
 | `iniciarDescargaSeleccionados` | Descarga seleccionados de la pagina actual (sin dedup) | `{tabId, tipoDescarga, claves[], origen}` |
-| `iniciarDescargaEmitidosMes` | Descarga emitidos de un mes, consultando dia por dia | `{tabId, tipoDescarga, ignorarHistorial, anio, mes}` |
+| `iniciarDescargaEmitidosMes` | Descarga emitidos de un mes, consultando dia por dia (y por tipo si `todosLosTipos`) | `{tabId, tipoDescarga, ignorarHistorial, anio, mes, todosLosTipos}` |
 | `navegarAEmitidos` | Navega al menu de consultas, hace click en emitidos y auto-consulta | `{tabId, url, tipoComprobante}` |
 | `detenerDescarga` | Detiene descarga en progreso | - |
 | `obtenerEstado` | Obtiene estado actual | - |
@@ -274,7 +309,7 @@ SRI_CONFIG = {
   TIMEOUT_PAGINA: 10000,     // ms max esperando cambio pagina
   TIMEOUT_WS: 15000,         // ms max esperando al WS de autorizacion (no expuesto en UI)
   MAX_REINTENTOS: 2,         // reintentos por descarga
-  DIAS_HISTORIAL: 30,        // auto-limpieza
+  DIAS_HISTORIAL: 90,        // auto-limpieza (~3 meses)
   SELECTORES: { ... },       // selectores CSS del SRI
   DOMINIO_SRI: 'sri.gob.ec', // filtro para downloads.onCreated
   ORGANIZACION: {
@@ -344,7 +379,10 @@ document.getElementById(linkId).click();
 - **Solucion**: Polling inteligente del paginador con fallback a delay fijo
 
 ### Chrome marca descargas como peligrosas
-- **Solucion**: `chrome.downloads.acceptDanger` automatico para URLs del SRI
+- **Solucion (parcial)**: se intenta `chrome.downloads.acceptDanger` para URLs del
+  SRI, pero Chrome exige llamarlo desde un contexto visible (pestana/popup); desde
+  el service worker normalmente rechaza (se captura). Si el navegador bloquea el
+  archivo, el usuario debe conservarlo desde la barra de descargas
 
 ### Deduplicacion no distinguia XML de PDF
 - **Solucion**: `exitoXml`/`exitoPdf` usan `null` = no se intento ese formato,
@@ -404,7 +442,7 @@ document.getElementById(linkId).click();
 - **Solucion**: `asegurarPrimeraPaginaEmitidos` antes de cada consulta;
   hook de XHR que detecta errores JSF/HTTP y aborta con mensaje claro;
   verificacion de que la tabla muestra el dia consultado; PDF de emitidos
-  via `descargarPdfEmitidoPorFetch`. Con esto 6 dias se consultan en ~1 s.
+  via `descargarPorFetch`. Con esto 6 dias se consultan en ~1 s.
 - Nota: la URL directa `recuperarComprobantes.jsf` SI funciona cuando la
   sesion de la app JSF ya fue inicializada (via accederAplicacion); solo
   rebota al login si no lo fue.
@@ -418,6 +456,43 @@ document.getElementById(linkId).click();
   columnas de fecha del historial/CSV ahora son correctas; los registros
   previos del historial tienen ambas fechas intercambiadas (solo difiere en
   comprobantes autorizados en un mes distinto al de emision).
+
+### Guardar la pestana Configuracion desactivaba la organizacion en carpetas
+- **Causa**: `guardarConfig` del popup enviaba la config sin `ORGANIZACION` y el
+  background reemplazaba `sriConfig` entero; al reiniciarse el service worker la
+  organizacion volvia al default (deshabilitada). "Restaurar" hacia lo mismo.
+- **Solucion**: el handler `guardarConfig` conserva la `ORGANIZACION` guardada
+  cuando el mensaje no la trae; `resetConfig` ya no la envia.
+
+### Cambio de pagina lento saltaba documentos en silencio
+- **Causa**: tras el timeout de `esperarCambioPagina` el bucle seguia sin
+  comprobar la pagina: reprocesaba la anterior (todo "omitido") y la ultima
+  pagina real nunca se descargaba.
+- **Solucion**: `irAPagina` confirma con el paginador que la tabla llego a la
+  pagina esperada (hasta 3 intentos, el click solo se repite si el paginador
+  sigue en la pagina anterior); si no, `procesarPaginasActuales` aborta con un
+  error visible. Ademas cada pagina verifica `paginacion.actual === pag`.
+
+### El historial podia dejar de guardarse sin aviso (limite de 10 MB)
+- **Causa**: todo el historial vivia en la clave `historialDescargas` y cada
+  pagina lo reescribia completo; al pasar la cuota el `set` fallaba en un catch
+  vacio y la deduplicacion dejaba de funcionar.
+- **Solucion**: una clave por sesion (`hs_<sesionId>`), permiso
+  `unlimitedStorage`, y si guardar falla se agrega un aviso visible
+  (`estadoDescarga.avisos`). `limpiarHistorialAntiguo` migra el formato anterior
+  y `leerHistorial` entiende ambos.
+
+### Avisos de sesion
+- `estadoDescarga.avisos` (array de textos) no aborta la descarga: el popup los
+  muestra en amarillo y persistentes, y van en la notificacion final. Usos:
+  archivos de recibidos bajados por el metodo alternativo (fetch) e historial
+  que no se pudo guardar.
+
+### Service worker reiniciado a mitad de descarga
+- `prepararSesion` deja la marca `sesionEnCurso` en `chrome.storage.session` y
+  `finalizarSesion` la quita. Si al arrancar el service worker la marca sigue
+  ahi, se notifica que la descarga se interrumpio (lo guardado por pagina ya
+  esta en el historial y se omite al reiniciar).
 
 ## Permisos requeridos (manifest.json)
 - `activeTab` - Acceso a la tab activa
@@ -437,8 +512,9 @@ Un ZIP con SOLO los archivos de la extension (nunca el repo entero):
 queda en `dist/sri-downloader-vX.Y.Z.zip` (carpeta gitignored).
 
 ### Checklist antes de publicar
-1. Subir la version en `manifest.json` Y en el footer de `popup.html`
-   (deben coincidir; la Web Store exige version mayor a la publicada)
+1. Subir la version en `manifest.json` (el footer del popup la lee del
+   manifest; la Web Store exige version mayor a la publicada) y en la linea
+   "Version" de este archivo
 2. Verificar sintaxis de los JS (no hay Node instalado: servir el proyecto con
    `python -m http.server` y validar con `new Function(src)` en una pestana
    de Chrome; esprima de Python NO sirve, no soporta `?.` de ES2020)
@@ -453,24 +529,35 @@ queda en `dist/sri-downloader-vX.Y.Z.zip` (carpeta gitignored).
    ficticios — nunca subir capturas con datos de sesion reales):
    - Promocional pequena 440x280: `promo-pequena-440x280.png`
    - Marquesina 1400x560: `promo-marquesina-1400x560.png`
-   - Capturas 1280x800 (max 5): `captura-1..5-*.png`
+   - Capturas 1280x800 (max 5): `captura-1..5-*.png` (recibidos, emitidos mes,
+     menu, historial, devolucion IVA)
 5. Enviar para revision
 
 ### Justificacion de permisos (seccion de privacidad del dashboard)
-Los `host_permissions` de `cel.sri.gob.ec` y `celcer.sri.gob.ec` (agregados en
-v1.5.0) disparan re-revision. Justificacion usada:
+El `host_permission` de `cel.sri.gob.ec` (agregado en v1.5.0; `celcer` se quito
+en v1.7.0 porque ya no se consulta el ambiente de pruebas). Justificacion usada:
 "Se usan para consultar el web service publico de autorizacion de comprobantes
 del SRI (AutorizacionComprobantesOffline) y obtener el XML autorizado de los
 comprobantes emitidos, que el portal no ofrece como descarga directa. Solo se
 envia la clave de acceso del comprobante; no se transmiten datos a terceros."
+`unlimitedStorage` (agregado en v1.7.0, no muestra advertencia al usuario).
+Justificacion: "El historial local de descargas (usado para no volver a descargar
+comprobantes) puede superar el limite de 10 MB de chrome.storage.local en
+usuarios con muchos comprobantes; se guarda solo en el equipo del usuario."
 Nota: los cambios de permisos alargan la revision (dias en vez de horas).
 
 ### Regenerar las imagenes promocionales
-Se generan renderizando HTML en Chrome (nunca capturas de sesion real):
-mocks con datos ficticios (RUC 1790012345001, "COMERCIAL EJEMPLO S.A."),
-capturados con la accion zoom a la region exacta y normalizados con Pillow a
-RGB 24 bits sin alfa. Los HTML fuente viven en el scratchpad de la sesion que
-los creo; si hay que regenerarlos, recrear mocks equivalentes.
+`python docs/mocks/generar.py` (requiere Chrome y Pillow). Renderiza con Chrome
+headless el popup y el panel de IVA REALES sobre un portal simulado con datos
+ficticios (RUC 1790012345001, "COMERCIAL EJEMPLO S.A."; nunca capturas de sesion
+real) y deja en `docs/` los PNG en RGB 24 bits sin alfa, al tamano exacto.
+- `docs/mocks/stage.html`: marco de navegador + portal ficticio + popup en iframe
+  (`?scene=recibidos|emitidos|menu|historial|iva`)
+- `docs/mocks/mock_chrome.js`: mock de `chrome.*` con los datos de cada escena
+- `docs/mocks/iva_page.html`: pantalla de devolucion simulada con `iva.js` real
+- `docs/mocks/promo.html`: marquesina y promocional pequena (`?tipo=`)
+Si cambia la UI basta volver a ejecutar el script; si cambian los mensajes que
+usa el popup (`obtenerEstado`, `obtenerHistorial`...) hay que ajustar el mock.
 
 ## Testing
 1. Ir a srienlinea.sri.gob.ec

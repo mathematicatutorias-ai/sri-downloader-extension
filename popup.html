@@ -88,7 +88,11 @@
             Dia consultado
           </label>
         </div>
-        <input type="date" id="mesEmitidos" class="config-input" style="width: 100%; cursor: pointer;" title="Se descargara el mes completo de la fecha elegida">
+        <input type="date" id="mesEmitidos" class="config-input" style="width: 100%; cursor: pointer; text-align: left; font-family: inherit;" title="Se descargara el mes completo de la fecha elegida">
+        <label class="radio-option" id="todosTiposWrap" style="margin-top: 8px;" title="Recorre el mes una vez por cada tipo: facturas, liquidaciones, notas de credito/debito, guias y retenciones">
+          <input type="checkbox" id="todosTiposEmitidos">
+          Todos los tipos de comprobante
+        </label>
       </div>
 
       <button id="btnDescargarTodo" class="btn btn-primary">
@@ -140,9 +144,13 @@
           Exitosos
         </label>
       </div>
+      <p id="avisoHistorial" class="historial-aviso"></p>
       <div id="listaHistorial" class="doc-list" style="max-height: 280px;">
         <p class="empty-msg">Cargando...</p>
       </div>
+      <button id="btnMasHistorial" class="btn btn-secondary" style="display: none; margin-top: 8px; font-size: 12px; padding: 8px;">
+        Mostrar mas
+      </button>
       <button id="btnReintentarFallidos" class="btn btn-primary" style="display: none; margin-top: 8px; font-size: 12px; padding: 8px;">
         Reintentar descarga (omite ya descargados)
       </button>
@@ -208,7 +216,7 @@
 
       <div class="config-row">
         <label class="config-label" for="cfgDiasHistorial">Dias de historial</label>
-        <input type="number" id="cfgDiasHistorial" class="config-input" min="1" max="365" step="1">
+        <input type="number" id="cfgDiasHistorial" class="config-input" min="1" max="730" step="1">
       </div>
     </div>
 
@@ -285,9 +293,10 @@
   </div>
 
   <div class="footer">
-    v1.6.0 - Solo para uso en srienlinea.sri.gob.ec
+    v<span id="extVersion"></span> - Solo para uso en srienlinea.sri.gob.ec
   </div>
 
+  <script src="config.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

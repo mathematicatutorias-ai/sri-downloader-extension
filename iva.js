@@ -24,9 +24,16 @@ if (window.SRI_IVA_LOADED) {
   const CFG = SRI_CONFIG.IVA;
   const PANEL_ID = 'sri-iva-panel';
   const STORAGE_KEY = 'ivaCategoriasCustom';
+  const STORAGE_AUTO = 'ivaAutoProcesar';
 
   /** @type {Object<string, string>} nombre comercial (MAYUSCULAS) -> tipo de gasto */
   let categoriasCustom = {};
+  /**
+   * Si el modo automatico pulsa "Procesar facturas seleccionadas" al terminar
+   * (envio al SRI). true por defecto; el usuario puede desactivarlo en el
+   * panel para revisar antes de enviar.
+   */
+  let autoProcesar = true;
   let autoRunning = false;
   let stopRequested = false;
   /** El usuario cerro el panel en esta pagina: no reabrirlo solo */
@@ -37,10 +44,56 @@ if (window.SRI_IVA_LOADED) {
   // =====================================================
 
   function cargarCategoriasCustom() {
-    chrome.storage.local.get(STORAGE_KEY, (data) => {
+    chrome.storage.local.get([STORAGE_KEY, STORAGE_AUTO], (data) => {
       categoriasCustom = data?.[STORAGE_KEY] || {};
+      autoProcesar = data?.[STORAGE_AUTO] !== false;
+      const chk = $('sri-iva-auto-procesar');
+      if (chk) chk.checked = autoProcesar;
       renderListaCustom();
     });
+  }
+
+  /**
+   * Descarga las categorias personalizadas como JSON (respaldo o para
+   * pasarlas a otro equipo).
+   */
+  function exportarCategorias() {
+    const blob = new Blob([JSON.stringify(categoriasCustom, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'categorias_devolucion_iva.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  /**
+   * Importa categorias desde un JSON {"NOMBRE COMERCIAL": "4", ...} (el
+   * formato que exporta este panel y el de categorias.json de la extension
+   * anterior). Se SUMAN a las existentes; las entradas invalidas se ignoran.
+   * @param {File} archivo
+   */
+  async function importarCategorias(archivo) {
+    try {
+      const datos = JSON.parse(await archivo.text());
+      if (!datos || typeof datos !== 'object' || Array.isArray(datos)) throw new Error('formato no valido');
+      let agregadas = 0;
+      for (const [nombre, valor] of Object.entries(datos)) {
+        const clave = String(nombre).trim().toUpperCase();
+        const tipo = String(valor);
+        if (clave && CFG.TIPOS_GASTO[tipo]) {
+          categoriasCustom[clave] = tipo;
+          agregadas++;
+        }
+      }
+      guardarCategoriasCustom();
+      renderListaCustom();
+      log(`Categorias importadas: ${agregadas}`, agregadas > 0 ? 'ok' : 'warn');
+    } catch (e) {
+      log(`No se pudo importar el archivo: ${e.message}`, 'warn');
+    }
   }
 
   function guardarCategoriasCustom() {
@@ -71,16 +124,45 @@ if (window.SRI_IVA_LOADED) {
     return CFG.TIPOS_GASTO[valor] || 'desconocido';
   }
 
+  /** Mayusculas y sin tildes/dieresis, para comparar nombres comerciales */
+  function normalizar(texto) {
+    return String(texto).toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+  }
+
+  /**
+   * true si el nombre comercial (ya normalizado) coincide con la clave.
+   * - Claves de mas de 4 caracteres: basta con que el nombre las CONTENGA
+   *   ("FARMACIA" coincide con "FARMACIAS" o "POLICLINICA" con "CLINICA").
+   * - Claves cortas (hasta 4: "RM", "AKI", "KFC", "ZARA"...): deben aparecer
+   *   como palabra completa. Con el simple "contiene", "RM" coincidia con
+   *   cualquier nombre que tuviera esas letras ("HERMANOS", "TERMINAL") y lo
+   *   clasificaba mal sin avisar.
+   */
+  function coincide(nombre, clave) {
+    const c = normalizar(clave);
+    if (!c) return false;
+    if (c.length > 4) return nombre.includes(c);
+    let desde = 0;
+    for (;;) {
+      const i = nombre.indexOf(c, desde);
+      if (i === -1) return false;
+      const antes = i === 0 ? '' : nombre[i - 1];
+      const despues = nombre[i + c.length] || '';
+      if (!/[A-Z0-9]/.test(antes) && !/[A-Z0-9]/.test(despues)) return true;
+      desde = i + 1;
+    }
+  }
+
   /**
    * Busca el tipo de gasto del nombre comercial: primero en las categorias
-   * personalizadas y luego en las base. Coincide si el nombre CONTIENE la clave.
+   * personalizadas y luego en las base (ver coincide).
    * @returns {string|null} value del select de tipo de gasto o null
    */
   function detectarCategoria(nombreComercial) {
-    const upper = nombreComercial.toUpperCase();
+    const nombre = normalizar(nombreComercial);
     for (const fuente of [categoriasCustom, IVA_CATEGORIAS_BASE]) {
       for (const [clave, valor] of Object.entries(fuente)) {
-        if (upper.includes(clave.toUpperCase())) return valor;
+        if (coincide(nombre, clave)) return valor;
       }
     }
     return null;
@@ -318,6 +400,11 @@ if (window.SRI_IVA_LOADED) {
           log(`Complete ${totalIncompletas} factura(s) manualmente antes de procesar`, 'warn');
           mostrarNotificacion(`${totalIncompletas} factura(s) sin tipo de gasto. Complete manualmente antes de procesar.`, 'error');
           setStatus(`${totalIncompletas} factura(s) pendientes`, 'warn');
+        } else if (totalFacturas > 0 && !autoProcesar) {
+          // El usuario prefiere revisar y pulsar "Procesar" el mismo
+          log('Facturas listas. Revise y pulse "Procesar facturas seleccionadas".', 'done');
+          mostrarNotificacion('Facturas listas. Revise y pulse "Procesar facturas seleccionadas".', 'ok');
+          setStatus('Listo para procesar - Revise', 'done');
         } else if (totalFacturas > 0) {
           await clickProcesar();
         } else {
@@ -460,13 +547,26 @@ if (window.SRI_IVA_LOADED) {
     }
     const btnAdd = el('button', { type: 'button', id: 'sri-iva-add-btn', title: 'Agregar' }, '+');
     addRow.append(inputNombre, selectCat, btnAdd);
-    customBody.append(addRow, el('div', { id: 'sri-iva-custom-list' }));
+    // Respaldo de las categorias personalizadas
+    const ioRow = el('div', { class: 'sri-iva-io-row' });
+    const btnExport = el('button', { type: 'button', class: 'sri-iva-io-btn', title: 'Guardar las categorias personalizadas en un archivo' }, 'Exportar');
+    const btnImport = el('button', { type: 'button', class: 'sri-iva-io-btn', title: 'Agregar categorias desde un archivo JSON' }, 'Importar');
+    const inputArchivo = el('input', { type: 'file', accept: '.json,application/json' });
+    inputArchivo.hidden = true;
+    ioRow.append(btnExport, btnImport, inputArchivo);
+    customBody.append(addRow, el('div', { id: 'sri-iva-custom-list' }), ioRow);
     custom.append(btnToggleCustom, customBody);
+
+    // Envio automatico al terminar el modo auto (activado por defecto)
+    const autoLabel = el('label', { class: 'sri-iva-auto-label' });
+    const chkAuto = el('input', { type: 'checkbox', id: 'sri-iva-auto-procesar' });
+    chkAuto.checked = autoProcesar;
+    autoLabel.append(chkAuto, document.createTextNode(' Procesar automaticamente al terminar el modo auto'));
 
     const aviso = el('p', { class: 'sri-iva-aviso' },
       'Revise los datos antes de enviar: el contribuyente es responsable de lo presentado al SRI.');
 
-    cuerpo.append(status, btnFill, btnNext, btnAuto, btnStop, btnClear, logDiv, custom, aviso);
+    cuerpo.append(status, btnFill, btnNext, btnAuto, btnStop, autoLabel, btnClear, logDiv, custom, aviso);
     panel.append(header, cuerpo);
     document.body.appendChild(panel);
 
@@ -526,6 +626,18 @@ if (window.SRI_IVA_LOADED) {
 
     btnToggleCustom.addEventListener('click', () => {
       customBody.hidden = !customBody.hidden;
+    });
+
+    chkAuto.addEventListener('change', () => {
+      autoProcesar = chkAuto.checked;
+      chrome.storage.local.set({ [STORAGE_AUTO]: autoProcesar });
+    });
+
+    btnExport.addEventListener('click', exportarCategorias);
+    btnImport.addEventListener('click', () => inputArchivo.click());
+    inputArchivo.addEventListener('change', () => {
+      if (inputArchivo.files[0]) importarCategorias(inputArchivo.files[0]);
+      inputArchivo.value = '';
     });
 
     const agregar = () => {

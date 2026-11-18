@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Devolucion de IVA (datos ficticios)</title>
+<link rel="stylesheet" href="iva.css">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1280px; height: 722px; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; background: #eef1f5; }
+  .portal { height: 46px; background: #0d3b8c; color: #fff; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; font-weight: 600; font-size: 15px; }
+  .portal small { font-weight: 400; font-size: 11px; text-align: right; line-height: 1.3; opacity: .9; }
+  .contenido { padding: 22px 30px; width: 950px; }
+  h2 { font-size: 19px; color: #1d2433; margin: 0 0 6px; }
+  p.sub { font-size: 12px; color: #555; margin: 0 0 14px; }
+  table { width: 100%; border-collapse: collapse; background: #fff; font-size: 11.5px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  th { background: #1756a9; color: #fff; padding: 9px 6px; font-size: 11px; }
+  td { padding: 8px 6px; text-align: center; border-bottom: 1px solid #e6e9ee; color: #333; }
+  .ui-chkbox-box { width: 16px; height: 16px; border: 1px solid #9aa3b2; border-radius: 3px; display: inline-block; background: #fff; vertical-align: middle; }
+  .ui-chkbox-box.on { background: #1756a9; border-color: #1756a9; position: relative; }
+  .ui-chkbox-box.on::after { content: ''; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+  td input[type=checkbox] { display: none; }
+  td input.iva { width: 70px; padding: 4px 6px; border: 1px solid #c3cad6; border-radius: 3px; text-align: right; font-size: 11.5px; }
+  .menu { display: inline-flex; align-items: center; justify-content: space-between; width: 130px; border: 1px solid #c3cad6; border-radius: 3px; padding: 4px 6px; background: #fff; font-size: 11.5px; }
+  .menu select { display: none; }
+  .menu .ui-selectonemenu-label-empty { color: #999; }
+  .ui-selectonemenu-trigger { width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #666; }
+  .procesar { margin-top: 16px; padding: 9px 18px; background: #1756a9; color: #fff; border: 0; border-radius: 4px; font-size: 12px; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="portal"><span>Portal Tributario</span><small>1790012345001<br>COMERCIAL EJEMPLO S.A.</small></div>
+  <div class="contenido">
+    <h2>Devolución de IVA - Personas con discapacidad</h2>
+    <p class="sub">Seleccione las facturas del período, ingrese el IVA solicitado y el tipo de gasto.</p>
+    <table>
+      <thead><tr><th></th><th>RUC emisor</th><th>Nombre comercial</th><th>Nro. factura</th><th>Fecha emisión</th><th>IVA</th><th>IVA solicitado</th><th>Tipo de gasto</th></tr></thead>
+      <tbody id="frm:tblFacturas_data"></tbody>
+    </table>
+    <button class="procesar" type="button" id="frm:btnGuardarFacturasSeleccionadas">Procesar facturas seleccionadas</button>
+  </div>
+
+<script>
+  // Mock minimo de chrome.* para iva.js
+  const storage = { ivaCategoriasCustom: { 'RESTAURANTE': '4' } };
+  window.chrome = {
+    storage: { local: {
+      get(keys, cb) { const o = {}; (Array.isArray(keys) ? keys : [keys]).forEach(k => { if (k in storage) o[k] = storage[k]; }); cb(o); },
+      set(o) { Object.assign(storage, o); }
+    } },
+    runtime: { onMessage: { addListener() {} } }
+  };
+
+  const filas = [
+    ['1790098765001', 'FARMACIA SAN RAFAEL', '001-002-000045821', '03/10/2026', '2.35'],
+    ['0990123456001', 'FERRETERIA EL CONSTRUCTOR', '002-001-000007893', '07/10/2026', '5.10'],
+    ['1791234567001', 'LIBRERIA Y PAPELERIA ESTUDIANTIL', '001-001-000012456', '11/10/2026', '1.80'],
+    ['0992345678001', 'RESTAURANTE LA ESQUINA', '003-001-000003217', '15/10/2026', '3.45'],
+    ['1790876543001', 'CLINICA SANTA ANA', '001-005-000098123', '21/10/2026', '12.00'],
+    ['0991987654001', 'COMERCIAL DEL VALLE S.A.', '001-001-000067890', '26/10/2026', '4.20']
+  ];
+  const tbody = document.getElementById('frm:tblFacturas_data');
+  filas.forEach(([ruc, nombre, nro, fecha, iva], i) => {
+    const tr = document.createElement('tr');
+    tr.setAttribute('data-ri', i);
+    tr.innerHTML = `<td><div class="ui-chkbox-box"></div><input type="checkbox"></td><td>${ruc}</td><td><label>${nombre}</label></td><td>${nro}</td><td>${fecha}</td><td><label>${iva}</label></td>` +
+      `<td><input class="iva" id="frm:t:${i}:txtIvaSolicitado"></td>` +
+      `<td><div class="menu" id="frm:t:${i}:cmbTipoGasto"><label id="frm:t:${i}:cmbTipoGasto_label" class="ui-selectonemenu-label ui-selectonemenu-label-empty">Seleccione</label>` +
+      `<select id="frm:t:${i}:cmbTipoGasto_input"><option value="">Seleccione</option><option value="1">Vestimenta</option><option value="2">Vivienda</option><option value="3">Salud</option><option value="4">Alimentación</option><option value="5">Educación</option></select><span class="ui-selectonemenu-trigger"></span></div></td>`;
+    const box = tr.querySelector('.ui-chkbox-box');
+    box.addEventListener('click', () => { box.classList.add('on'); box.nextElementSibling.checked = true; });
+    tbody.appendChild(tr);
+  });
+</script>
+<script src="config.js"></script>
+<script src="iva-categorias.js"></script>
+<script src="iva.js"></script>
+<script>
+  // Mostrar el asistente trabajando: rellenar la pagina y abrir las categorias
+  setTimeout(() => {
+    document.getElementById('sri-iva-toggle-custom')?.click();
+    document.getElementById('sri-iva-btn-fill')?.click();
+  }, 300);
+</script>
+</body>
+</html>

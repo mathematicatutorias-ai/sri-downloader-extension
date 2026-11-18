@@ -25,8 +25,25 @@ let estadoDescarga = {
   rucUsuario: null,
   timestampInicio: null,
   tiempoEstimado: null,
-  error: null
+  error: null,
+  avisos: [],
+  viaAlternativa: 0
 };
+
+/**
+ * true si la URL pertenece al SRI. Compara el hostname (no un includes()
+ * sobre la URL completa, que aceptaria "otro-sitio.com/?x=sri.gob.ec").
+ * @param {string} url
+ * @returns {boolean}
+ */
+function esUrlDelSri(url) {
+  try {
+    const host = new URL(url).hostname;
+    return host === SRI_CONFIG.DOMINIO_SRI || host.endsWith('.' + SRI_CONFIG.DOMINIO_SRI);
+  } catch (e) {
+    return false;
+  }
+}
 
 // Sistema de deteccion de descargas basado en timing + filtro laxo de origen.
 // Cuando hacemos click en un link del SRI, esperamos que onCreated se dispare
@@ -55,7 +72,7 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
   const url = downloadItem.url || '';
   const finalUrl = downloadItem.finalUrl || '';
   const esDelSri = url === '' || url.startsWith('blob:') ||
-    url.includes(SRI_CONFIG.DOMINIO_SRI) || finalUrl.includes(SRI_CONFIG.DOMINIO_SRI);
+    esUrlDelSri(url) || esUrlDelSri(finalUrl);
   if (!esDelSri) return;
 
   // Guardar metadata para onDeterminingFilename antes de limpiar
@@ -75,16 +92,16 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
 // Interceptar descargas para organizar en carpetas
 chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
   let meta = downloadMetadataMap.get(downloadItem.id);
-  let esWsXml = false;
+  let esDataUrl = false;
 
-  // Descarga por data URL iniciada por la extension (XML del WS o PDF por
-  // fetch): el filename pasado a chrome.downloads.download NO sobrevive a
-  // este listener (cualquier suggest con nombre lo pisa), asi que la ruta
-  // definitiva se decide aqui
+  // Descarga por data URL iniciada por la extension (XML del WS o archivo
+  // obtenido por fetch): el filename pasado a chrome.downloads.download NO
+  // sobrevive a este listener (cualquier suggest con nombre lo pisa), asi
+  // que la ruta definitiva se decide aqui
   if (!meta && pendingDataUrlMeta && downloadItem.url?.startsWith('data:')) {
     meta = pendingDataUrlMeta;
     pendingDataUrlMeta = null;
-    esWsXml = true;
+    esDataUrl = true;
   }
 
   if (!meta) {
@@ -110,7 +127,7 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
 
   if (rutaCompleta) {
     suggest({ filename: rutaCompleta, conflictAction: 'overwrite' });
-  } else if (esWsXml) {
+  } else if (esDataUrl) {
     // Sin organizacion: nombre por clave de acceso en la carpeta de descargas
     // (el nombre generico que Chrome genera para un data URL no sirve)
     suggest({ filename: construirNombreArchivo('claveAcceso', meta.docMetadata, extension) });
@@ -120,20 +137,20 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
   return true;
 });
 
-// Aceptar automaticamente descargas del SRI marcadas como "peligrosas"
+// Intentar aceptar descargas del SRI marcadas como "peligrosas". Es solo un
+// intento: Chrome exige que acceptDanger se llame desde un contexto visible
+// (pestana o popup), asi que desde el service worker normalmente rechaza la
+// promesa; se captura para no dejar errores sin manejar. Si el navegador
+// bloquea el archivo, el usuario debe conservarlo desde la barra de descargas
 chrome.downloads.onChanged.addListener((delta) => {
   if (delta.danger && delta.danger.current === 'file') {
     chrome.downloads.search({ id: delta.id }, (items) => {
-      if (items.length > 0) {
-        const url = items[0].url || '';
-        if (url.includes(SRI_CONFIG.DOMINIO_SRI)) {
-          try {
-            if (chrome.downloads.acceptDanger) {
-              chrome.downloads.acceptDanger(delta.id);
-            }
-          } catch (e) {
-            // acceptDanger puede no estar disponible en versiones recientes de Chrome/Edge
-          }
+      if (items.length > 0 && esUrlDelSri(items[0].url || '')) {
+        try {
+          const p = chrome.downloads.acceptDanger?.(delta.id);
+          if (p?.catch) p.catch(() => {});
+        } catch (e) {
+          // acceptDanger no disponible en esta version de Chrome/Edge
         }
       }
     });
@@ -186,8 +203,7 @@ let indiceDescargados = new Set();
  * @returns {Promise<Set<string>>} Claves de acceso que se pueden omitir
  */
 async function construirIndiceDescargados(tipoDescarga) {
-  const data = await chrome.storage.local.get(['historialDescargas']);
-  const historial = data.historialDescargas || {};
+  const historial = await leerHistorial();
   const indice = new Set();
 
   for (const ruc in historial) {
@@ -232,44 +248,72 @@ async function guardarBufferAlStorage(esFinal = true) {
   if (bufferSesion.documentos.length === 0) return;
 
   try {
-    const data = await chrome.storage.local.get(['historialDescargas']);
-    const historial = data.historialDescargas || {};
-
-    const ruc = bufferSesion.rucUsuario || 'sin_ruc';
-    if (!historial[ruc]) {
-      historial[ruc] = {
-        sesiones: {},
-        ultimaActualizacion: null
-      };
-    }
-
-    const sesionId = estadoDescarga.sesionId;
     const exitosos = bufferSesion.documentos.filter(d => d.exito).length;
-    const fallidos = bufferSesion.documentos.filter(d => !d.exito).length;
 
-    historial[ruc].sesiones[sesionId] = {
-      fecha: new Date().toISOString(),
-      tipoDescarga: estadoDescarga.tipoDescarga,
-      origen: estadoDescarga.origen || 'recibidos',
-      documentos: bufferSesion.documentos,
-      resumen: {
-        exitosos: exitosos,
-        fallidos: fallidos,
-        total: bufferSesion.documentos.length
+    // Una clave por sesion: guardar solo reescribe ESTA sesion, no todo el
+    // historial (antes cada pagina leia y reescribia el historial completo)
+    await chrome.storage.local.set({
+      [PREFIJO_SESION + estadoDescarga.sesionId]: {
+        ruc: bufferSesion.rucUsuario || 'sin_ruc',
+        fecha: new Date().toISOString(),
+        tipoDescarga: estadoDescarga.tipoDescarga,
+        origen: estadoDescarga.origen || 'recibidos',
+        documentos: bufferSesion.documentos,
+        resumen: {
+          exitosos: exitosos,
+          fallidos: bufferSesion.documentos.length - exitosos,
+          total: bufferSesion.documentos.length
+        }
       }
-    };
-
-    historial[ruc].ultimaActualizacion = new Date().toISOString();
-
-    await chrome.storage.local.set({ historialDescargas: historial });
+    });
 
     if (esFinal) {
       bufferSesion = { documentos: [], rucUsuario: null };
     }
 
   } catch (e) {
-    // Error guardando historial
+    // No ocultar el fallo: sin historial la deduplicacion deja de funcionar
+    agregarAviso(`No se pudo guardar el historial de descargas (${e.message}). Los documentos de esta sesion podrian volver a descargarse.`);
   }
+}
+
+/**
+ * Prefijo de las claves de chrome.storage.local que guardan una sesion del
+ * historial: `hs_<sesionId>` -> {ruc, fecha, tipoDescarga, origen, documentos,
+ * resumen}. Hasta la v1.6.0 todo el historial vivia en una sola clave
+ * `historialDescargas` ({ruc: {sesiones: {...}}}); limpiarHistorialAntiguo la
+ * migra al formato nuevo y leerHistorial entiende ambos.
+ */
+const PREFIJO_SESION = 'hs_';
+
+/**
+ * Lee el historial completo y lo devuelve con la forma
+ * {ruc: {sesiones: {sesionId: sesion}}} (la que consumen el popup y el indice
+ * de dedup), juntando las claves por sesion y el formato anterior si existe.
+ * @returns {Promise<Object>}
+ */
+async function leerHistorial() {
+  const todo = await chrome.storage.local.get(null);
+  const historial = {};
+  const agregar = (ruc, sesionId, sesion) => {
+    if (!sesion || !Array.isArray(sesion.documentos)) return;
+    if (!historial[ruc]) historial[ruc] = { sesiones: {} };
+    historial[ruc].sesiones[sesionId] = sesion;
+  };
+
+  const anterior = todo.historialDescargas || {};
+  for (const ruc in anterior) {
+    for (const sesionId in (anterior[ruc].sesiones || {})) {
+      agregar(ruc, sesionId, anterior[ruc].sesiones[sesionId]);
+    }
+  }
+
+  for (const clave in todo) {
+    if (clave.startsWith(PREFIJO_SESION)) {
+      agregar(todo[clave]?.ruc || 'sin_ruc', clave.slice(PREFIJO_SESION.length), todo[clave]);
+    }
+  }
+  return historial;
 }
 
 /**
@@ -279,45 +323,71 @@ async function guardarBufferAlStorage(esFinal = true) {
  */
 async function obtenerHistorial(ruc = null) {
   try {
-    const data = await chrome.storage.local.get(['historialDescargas']);
-    const historial = data.historialDescargas || {};
-
-    if (ruc) {
-      return historial[ruc] || null;
-    }
-    return historial;
+    const historial = await leerHistorial();
+    return ruc ? (historial[ruc] || null) : historial;
   } catch (e) {
     return null;
   }
 }
 
 /**
+ * Borra todo el historial (claves por sesion + formato anterior).
+ * @returns {Promise<void>}
+ */
+async function borrarHistorial() {
+  const todo = await chrome.storage.local.get(null);
+  const claves = Object.keys(todo).filter(k => k.startsWith(PREFIJO_SESION));
+  claves.push('historialDescargas');
+  await chrome.storage.local.remove(claves);
+}
+
+/**
  * Limpia sesiones del historial con mas de N dias de antiguedad
- * (SRI_CONFIG.DIAS_HISTORIAL) y elimina RUCs que quedan sin sesiones.
+ * (SRI_CONFIG.DIAS_HISTORIAL). De paso migra el formato anterior (una sola
+ * clave con todo) a una clave por sesion.
  * @returns {Promise<void>}
  */
 async function limpiarHistorialAntiguo() {
   try {
-    const data = await chrome.storage.local.get(['historialDescargas']);
-    const historial = data.historialDescargas || {};
+    const todo = await chrome.storage.local.get(null);
     const limite = Date.now() - (SRI_CONFIG.DIAS_HISTORIAL * 24 * 60 * 60 * 1000);
+    const esAntigua = (sesion) => !(new Date(sesion?.fecha).getTime() >= limite);
+    const borrar = [];
+    const escribir = {};
 
-    for (const ruc in historial) {
-      for (const sesionId in historial[ruc].sesiones) {
-        const fecha = new Date(historial[ruc].sesiones[sesionId].fecha).getTime();
-        if (fecha < limite) {
-          delete historial[ruc].sesiones[sesionId];
+    // Migracion del formato anterior: conservar solo las sesiones vigentes
+    if (todo.historialDescargas) {
+      for (const ruc in todo.historialDescargas) {
+        const sesiones = todo.historialDescargas[ruc].sesiones || {};
+        for (const sesionId in sesiones) {
+          if (!esAntigua(sesiones[sesionId])) {
+            escribir[PREFIJO_SESION + sesionId] = { ...sesiones[sesionId], ruc };
+          }
         }
       }
-      if (Object.keys(historial[ruc].sesiones).length === 0) {
-        delete historial[ruc];
-      }
+      borrar.push('historialDescargas');
     }
 
-    await chrome.storage.local.set({ historialDescargas: historial });
+    for (const clave in todo) {
+      if (clave.startsWith(PREFIJO_SESION) && esAntigua(todo[clave])) borrar.push(clave);
+    }
+
+    // Primero escribir lo migrado y recien despues borrar el formato anterior
+    if (Object.keys(escribir).length > 0) await chrome.storage.local.set(escribir);
+    if (borrar.length > 0) await chrome.storage.local.remove(borrar);
   } catch (e) {
-    // Error limpiando historial
+    // Error limpiando historial: se reintenta en la proxima sesion
   }
+}
+
+/**
+ * Agrega un aviso a la sesion actual (sin duplicarlo). Los avisos no son
+ * errores que aborten: el popup y la notificacion final los muestran.
+ * @param {string} texto
+ */
+function agregarAviso(texto) {
+  if (!Array.isArray(estadoDescarga.avisos)) estadoDescarga.avisos = [];
+  if (!estadoDescarga.avisos.includes(texto)) estadoDescarga.avisos.push(texto);
 }
 
 // Metodo de descarga activo: 'mojarra' o 'click'
@@ -546,14 +616,18 @@ function bytesADataUrl(bytes, mime) {
 }
 
 /**
- * Consulta el WS de autorizacion del SRI y devuelve el XML del comprobante
- * autorizado (des-escapado), o null si no esta autorizado o falla.
+ * Consulta el WS de autorizacion del SRI (siempre PRODUCCION: es el ambiente
+ * del portal donde se consulta) y devuelve el XML del comprobante autorizado
+ * (des-escapado).
+ * Distingue la respuesta definitiva del SRI (el comprobante no esta
+ * autorizado o no existe: reintentar no cambia nada) de los fallos
+ * transitorios (red, timeout, HTTP de error), que lanzan excepcion.
  * @param {string} claveAcceso - Clave de acceso de 49 digitos
- * @param {boolean} [pruebas=false] - Usar ambiente de pruebas (celcer)
- * @returns {Promise<{xml: string, numeroAutorizacion: string, fechaAutorizacion: string}|null>}
+ * @returns {Promise<{xml: string, numeroAutorizacion: string, fechaAutorizacion: string}|{noAutorizado: true, estado: string}>}
+ * @throws {Error} Fallo transitorio (red, timeout, HTTP >= 400)
  */
-async function consultarXmlAutorizado(claveAcceso, pruebas = false) {
-  const endpoint = pruebas ? SRI_CONFIG.WS_AUTORIZACION.PRUEBAS : SRI_CONFIG.WS_AUTORIZACION.PRODUCCION;
+async function consultarXmlAutorizado(claveAcceso) {
+  const endpoint = SRI_CONFIG.WS_AUTORIZACION.PRODUCCION;
   const soap = '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="' +
     SRI_CONFIG.WS_AUTORIZACION.NAMESPACE + '"><soapenv:Header/><soapenv:Body>' +
     '<ec:autorizacionComprobante><claveAccesoComprobante>' + claveAcceso +
@@ -567,17 +641,17 @@ async function consultarXmlAutorizado(claveAcceso, pruebas = false) {
     body: soap,
     signal: AbortSignal.timeout(SRI_CONFIG.TIMEOUT_WS)
   });
-  if (!resp.ok) return null;
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
   const txt = await resp.text();
 
-  // Verificar estado AUTORIZADO
+  // Verificar estado AUTORIZADO. Sin <estado> el WS no encontro el comprobante
   const estado = (txt.match(/<estado>([^<]*)<\/estado>/) || [])[1];
-  if (estado !== 'AUTORIZADO') return null;
+  if (estado !== 'AUTORIZADO') return { noAutorizado: true, estado: estado || 'NO ENCONTRADO' };
 
   // Extraer el comprobante (viene escapado, puede o no estar en CDATA)
   const m = txt.match(/<comprobante>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/comprobante>/);
-  if (!m || !m[1]) return null;
+  if (!m || !m[1]) throw new Error('respuesta sin comprobante');
 
   const xml = desescaparXml(m[1]).trim();
   return {
@@ -588,17 +662,20 @@ async function consultarXmlAutorizado(claveAcceso, pruebas = false) {
 }
 
 /**
- * Descarga el XML autorizado de un comprobante emitido via web service.
- * Intenta produccion y, si no encuentra autorizacion, ambiente de pruebas.
+ * Descarga el XML autorizado de un comprobante emitido via web service
+ * (ambiente de produccion).
  * @param {string} claveAcceso - Clave de acceso de 49 digitos
  * @param {Object} docMetadata - Metadata para organizar/nombrar el archivo
- * @returns {Promise<boolean>} true si se disparo la descarga
+ * @returns {Promise<{ok: boolean, definitivo?: boolean, error?: string}>}
+ *   ok=true si se disparo la descarga; definitivo=true si el SRI respondio
+ *   que el comprobante no esta autorizado (no tiene sentido reintentar)
  */
 async function descargarXmlEmitido(claveAcceso, docMetadata) {
   try {
-    let resultado = await consultarXmlAutorizado(claveAcceso, false);
-    if (!resultado) resultado = await consultarXmlAutorizado(claveAcceso, true);
-    if (!resultado) return false;
+    const resultado = await consultarXmlAutorizado(claveAcceso);
+    if (resultado.noAutorizado) {
+      return { ok: false, definitivo: true, error: `XML no disponible en el SRI (estado: ${resultado.estado})` };
+    }
 
     const url = xmlADataUrl(resultado.xml);
     const meta = { ...docMetadata, rucUsuario: estadoDescarga.rucUsuario };
@@ -613,32 +690,36 @@ async function descargarXmlEmitido(claveAcceso, docMetadata) {
       filename: `${claveAcceso}.xml`,
       conflictAction: 'uniquify'
     });
-    return true;
+    return { ok: true };
   } catch (e) {
     pendingDataUrlMeta = null;
-    return false;
+    return { ok: false, error: `Error descargando XML (${e.message})` };
   }
 }
 
 /**
- * Descarga el PDF/RIDE de un emitido haciendo el POST JSF del link con fetch
- * desde la pagina (misma sesion y cookies) en vez de enviar el formulario con
- * mojarra.jsfcljs. Verificado en vivo (2026-11): en emitidos el submit del
- * formulario (incluso el click manual en RIDE) responde 503, mientras que el
- * mismo POST por fetch devuelve el PDF en ~100 ms. Ademas evita depender de
- * la ventana de tiempo de downloads.onCreated (5 s de timeout por intento).
- * Si la respuesta no es un PDF (sesion caida, pantalla distinta), devuelve
- * false y el llamador decide si cae al metodo clasico.
+ * Descarga el archivo de un link JSF (XML o PDF/RIDE) haciendo el POST del
+ * link con fetch desde la pagina (misma sesion y cookies) en vez de enviar el
+ * formulario con mojarra.jsfcljs.
+ * - Emitidos (PDF): es el metodo principal. Verificado en vivo (2026-11): el
+ *   submit del formulario (incluso el click manual en RIDE) responde 503,
+ *   mientras que el mismo POST por fetch devuelve el PDF en ~100 ms.
+ * - Recibidos: es solo el RESPALDO cuando el metodo normal (mojarra/click)
+ *   agoto sus reintentos; el llamador lo avisa al usuario.
+ * La respuesta se valida por contenido y no por Content-Type: un PDF empieza
+ * con "%PDF"; un XML empieza con "<" y no es una pagina HTML ni una respuesta
+ * parcial de JSF (lo que devuelve el SRI con la sesion caida o un error).
  * @param {number} tabId - Tab del SRI
- * @param {string} linkId - ID del link JSF del PDF (...:lnkPdf)
+ * @param {string} linkId - ID del link JSF (...:lnkXml o ...:lnkPdf)
  * @param {Object} docMetadata - Metadata para organizar/nombrar el archivo
+ * @param {'xml'|'pdf'} tipoArchivo - Formato esperado
  * @returns {Promise<boolean>} true si se disparo la descarga
  */
-async function descargarPdfEmitidoPorFetch(tabId, linkId, docMetadata) {
+async function descargarPorFetch(tabId, linkId, docMetadata, tipoArchivo) {
   try {
     const r = await chrome.scripting.executeScript({
       target: { tabId: tabId },
-      func: async (linkId, timeoutMs) => {
+      func: async (linkId, tipoArchivo, timeoutMs) => {
         const form = document.getElementById('frmPrincipal');
         if (!form || !document.getElementById(linkId)) return { ok: false, error: 'sin-form-o-link' };
         // Mismos campos que enviaria mojarra.jsfcljs: el formulario completo
@@ -651,27 +732,34 @@ async function descargarPdfEmitidoPorFetch(tabId, linkId, docMetadata) {
           credentials: 'include',
           signal: AbortSignal.timeout(timeoutMs)
         });
-        const ct = resp.headers.get('content-type') || '';
-        if (!resp.ok || !ct.includes('pdf')) return { ok: false, error: `status ${resp.status} ${ct}` };
+        if (!resp.ok) return { ok: false, error: `status ${resp.status}` };
         const bytes = new Uint8Array(await resp.arrayBuffer());
-        if (bytes.length === 0) return { ok: false, error: 'pdf-vacio' };
+        if (bytes.length === 0) return { ok: false, error: 'vacio' };
+
+        const cabecera = new TextDecoder('utf-8').decode(bytes.subarray(0, 600)).replace(/^﻿/, '').trimStart();
+        const valido = tipoArchivo === 'pdf'
+          ? cabecera.startsWith('%PDF')
+          : cabecera.startsWith('<') && !/<!doctype html|<html|<partial-response/i.test(cabecera);
+        if (!valido) return { ok: false, error: 'contenido-inesperado' };
+
         let bin = '';
         for (let i = 0; i < bytes.length; i += 0x8000) {
           bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
         }
         return { ok: true, base64: btoa(bin) };
       },
-      args: [linkId, SRI_CONFIG.TIMEOUT_WS]
+      args: [linkId, tipoArchivo, SRI_CONFIG.TIMEOUT_WS]
     });
     const res = r[0]?.result;
     if (!res?.ok) return false;
 
     const meta = { ...docMetadata, rucUsuario: estadoDescarga.rucUsuario };
+    const mime = tipoArchivo === 'pdf' ? 'application/pdf' : 'application/xml';
     // Igual que el XML del WS: la ruta final la decide onDeterminingFilename
-    pendingDataUrlMeta = { docMetadata: meta, tipoArchivo: 'pdf' };
+    pendingDataUrlMeta = { docMetadata: meta, tipoArchivo };
     await chrome.downloads.download({
-      url: 'data:application/pdf;base64,' + res.base64,
-      filename: `${docMetadata.claveAcceso}.pdf`,
+      url: `data:${mime};base64,${res.base64}`,
+      filename: `${docMetadata.claveAcceso}.${tipoArchivo}`,
       conflictAction: 'uniquify'
     });
     return true;
@@ -692,7 +780,7 @@ async function descargarPdfEmitidoPorFetch(tabId, linkId, docMetadata) {
  */
 async function descargarPdfEmitidoConReintento(tabId, linkId, docMetadata) {
   for (let intento = 0; intento <= SRI_CONFIG.MAX_REINTENTOS; intento++) {
-    const exito = await descargarPdfEmitidoPorFetch(tabId, linkId, docMetadata);
+    const exito = await descargarPorFetch(tabId, linkId, docMetadata, 'pdf');
     if (exito) return true;
     if (estadoDescarga.detenido) return false;
     if (intento < SRI_CONFIG.MAX_REINTENTOS) {
@@ -703,23 +791,47 @@ async function descargarPdfEmitidoConReintento(tabId, linkId, docMetadata) {
 }
 
 /**
+ * Descarga de RECIBIDOS: prima el metodo normal (mojarra/click, con sus
+ * reintentos). Solo si ese metodo no logro descargar se intenta UNA vez por
+ * fetch como respaldo; cuando el respaldo funciona se cuenta en
+ * estadoDescarga.viaAlternativa para avisar al usuario al terminar.
+ * @param {number} tabId - Tab del SRI
+ * @param {string} linkId - ID del link JSF
+ * @param {Object} docMetadata - Metadata del documento
+ * @param {'xml'|'pdf'} tipoArchivo - Formato que se esta descargando
+ * @returns {Promise<{ok: boolean, alternativa: boolean}>}
+ */
+async function descargarRecibidoConRespaldo(tabId, linkId, docMetadata, tipoArchivo) {
+  if (await ejecutarConReintento(tabId, linkId, docMetadata, tipoArchivo)) {
+    return { ok: true, alternativa: false };
+  }
+  if (estadoDescarga.detenido) return { ok: false, alternativa: false };
+
+  const ok = await descargarPorFetch(tabId, linkId, docMetadata, tipoArchivo);
+  if (ok) estadoDescarga.viaAlternativa = (estadoDescarga.viaAlternativa || 0) + 1;
+  return { ok, alternativa: ok };
+}
+
+/**
  * Descarga el XML de un emitido via web service, con reintentos automaticos
- * (SRI_CONFIG.MAX_REINTENTOS, con DELAY_REINTENTO entre intentos).
+ * (SRI_CONFIG.MAX_REINTENTOS, con DELAY_REINTENTO entre intentos). No
+ * reintenta si el SRI respondio de forma definitiva que no esta autorizado.
  * @param {string} claveAcceso - Clave de acceso de 49 digitos
  * @param {Object} docMetadata - Metadata para organizar/nombrar el archivo
- * @returns {Promise<boolean>} true si se disparo la descarga
+ * @returns {Promise<{ok: boolean, error?: string}>}
  */
 async function descargarXmlEmitidoConReintento(claveAcceso, docMetadata) {
+  let resultado = { ok: false, error: 'Error descargando XML' };
   for (let intento = 0; intento <= SRI_CONFIG.MAX_REINTENTOS; intento++) {
-    const exito = await descargarXmlEmitido(claveAcceso, docMetadata);
-    if (exito) return true;
+    resultado = await descargarXmlEmitido(claveAcceso, docMetadata);
+    if (resultado.ok || resultado.definitivo) return resultado;
     // No seguir reintentando si el usuario pulso Detener
-    if (estadoDescarga.detenido) return false;
+    if (estadoDescarga.detenido) return resultado;
     if (intento < SRI_CONFIG.MAX_REINTENTOS) {
       await delay(SRI_CONFIG.DELAY_REINTENTO);
     }
   }
-  return false;
+  return resultado;
 }
 
 /**
@@ -761,7 +873,13 @@ async function obtenerDatosPagina(tabId, origen = 'recibidos') {
         const tabla = document.querySelector(
           origen === 'emitidos' ? selectores.TABLA_EMITIDOS : selectores.TABLA_RECIBIDOS
         );
-        if (!tabla) return { error: `No se encontro la tabla de comprobantes ${origen}` };
+        if (!tabla) {
+          // Sesion caida: el SRI redirige al login (Keycloak)
+          if (/\/auth\/realms\//.test(location.pathname) || document.querySelector('#kc-form-login, #kc-login')) {
+            return { error: 'La sesion del SRI expiro. Inicia sesion de nuevo y vuelve a iniciar la descarga (lo ya descargado se omite).' };
+          }
+          return { error: `No se encontro la tabla de comprobantes ${origen}` };
+        }
 
         // RUC del usuario logueado
         const rucUsuario = document.querySelector(selectores.RUC_USUARIO)?.textContent?.match(/\d{13}/)?.[0] || 'desconocido';
@@ -792,6 +910,9 @@ async function obtenerDatosPagina(tabId, origen = 'recibidos') {
             documentos.push({
               index, ruc, razonSocial, tipoDoc, serie, claveAcceso,
               fechaEmision, fechaAutorizacion,
+              valorSinImpuestos: celdas[6]?.textContent?.trim() || '',
+              iva: celdas[7]?.textContent?.trim() || '',
+              importeTotal: celdas[8]?.textContent?.trim() || '',
               tieneXml: !!linkXml,
               tienePdf: !!linkPdf,
               linkXmlId: linkXml?.id,
@@ -814,6 +935,9 @@ async function obtenerDatosPagina(tabId, origen = 'recibidos') {
               claveAcceso,
               fechaEmision: celdas[4]?.textContent?.trim() || '',
               fechaAutorizacion: celdas[3]?.textContent?.trim() || '',
+              valorSinImpuestos: celdas[5]?.textContent?.trim() || '',
+              iva: celdas[6]?.textContent?.trim() || '',
+              importeTotal: celdas[7]?.textContent?.trim() || '',
               tieneXml: !!claveAcceso, // via web service
               tienePdf: !!linkPdf,
               linkXmlId: null,
@@ -836,10 +960,52 @@ async function obtenerDatosPagina(tabId, origen = 'recibidos') {
       },
       args: [SRI_CONFIG.SELECTORES, origen]
     });
-    return resultado[0]?.result;
+    return resultado[0]?.result || { error: 'No se pudo leer la pagina del SRI' };
   } catch (e) {
-    return { error: e.message };
+    // Tipico cuando la pestana salio del SRI (login en otro dominio, pagina
+    // de error del navegador) y la extension ya no tiene acceso a ella
+    return { error: `No se pudo acceder a la pagina del SRI (${e.message}). Verifica que la sesion siga activa.` };
   }
+}
+
+/**
+ * Lleva la tabla a la pagina indicada y CONFIRMA que llego: el paginador de
+ * PrimeFaces solo cambia su texto cuando llega la respuesta, asi que es la
+ * senal de que la tabla es la nueva. Si el SRI tarda mas que TIMEOUT_PAGINA
+ * se reintenta (esperando mas y, si sigue en la pagina anterior, volviendo a
+ * pulsar). Devolver false obliga al llamador a abortar: seguir sin confirmar
+ * reprocesaria la pagina vieja (todo "omitido") y dejaria sin descargar las
+ * ultimas paginas, en silencio.
+ * @param {number} tabId - Tab del SRI
+ * @param {number} esperada - Pagina destino (1 = primera; n = siguiente de n-1)
+ * @param {'recibidos'|'emitidos'} origen - Tabla consultada
+ * @returns {Promise<boolean>} true solo si el paginador muestra la pagina esperada
+ */
+async function irAPagina(tabId, esperada, origen) {
+  const INTENTOS = 3;
+  for (let intento = 0; intento < INTENTOS; intento++) {
+    if (estadoDescarga.detenido) return false;
+
+    const datos = await obtenerDatosPagina(tabId, origen);
+    if (datos.error) return false;
+    const actual = datos.paginacion.actual;
+    if (actual === esperada) return true;
+
+    if (esperada === 1) {
+      await navegarPrimera(tabId);
+    } else if (actual === esperada - 1) {
+      await navegarSiguiente(tabId, esperada - 1);
+    } else {
+      return false; // pagina inesperada: no se puede llegar con "siguiente"
+    }
+
+    if (await esperarCambioPagina(tabId, esperada, origen)) return true;
+    // Timeout: margen extra antes de volver a comprobar/pulsar
+    await delay(SRI_CONFIG.DELAY_PAGINA);
+  }
+
+  const datos = await obtenerDatosPagina(tabId, origen);
+  return !datos.error && datos.paginacion.actual === esperada;
 }
 
 /**
@@ -866,13 +1032,22 @@ async function navegarPrimera(tabId) {
 /**
  * Navega a la siguiente pagina del paginador PrimeFaces.
  * @param {number} tabId - Tab del SRI
+ * @param {number} [soloSiPagina] - Si se indica, solo pulsa cuando el
+ *   paginador muestra esa pagina. La comprobacion y el click ocurren en la
+ *   misma ejecucion: evita avanzar dos paginas si la respuesta de un click
+ *   anterior llego justo entre la lectura y el nuevo click
  * @returns {Promise<boolean>} true si el boton existia y se clickeo
  */
-async function navegarSiguiente(tabId) {
+async function navegarSiguiente(tabId, soloSiPagina) {
   try {
     const resultado = await chrome.scripting.executeScript({
       target: { tabId: tabId },
-      func: (selector) => {
+      func: (selector, selectorPaginador, soloSiPagina) => {
+        if (soloSiPagina) {
+          const texto = document.querySelector(selectorPaginador)?.textContent || '';
+          const actual = parseInt((texto.match(/\((\d+) of \d+\)/) || [])[1], 10);
+          if (actual !== soloSiPagina) return false;
+        }
         const boton = document.querySelector(selector);
         if (boton) {
           boton.click();
@@ -880,7 +1055,7 @@ async function navegarSiguiente(tabId) {
         }
         return false;
       },
-      args: [SRI_CONFIG.SELECTORES.BOTON_SIGUIENTE]
+      args: [SRI_CONFIG.SELECTORES.BOTON_SIGUIENTE, SRI_CONFIG.SELECTORES.PAGINADOR, soloSiPagina || null]
     });
     return resultado[0]?.result ?? false;
   } catch (e) {
@@ -931,7 +1106,9 @@ function sanitizarNombreCarpeta(nombre) {
     .replace(/[/\\:*?"<>|]/g, '_')
     .replace(/\s+/g, ' ')
     .trim()
-    .substring(0, 100) || 'sin_nombre';
+    .substring(0, 100)
+    // Windows no admite carpetas/archivos terminados en punto o espacio
+    .replace(/[. ]+$/, '') || 'sin_nombre';
 }
 
 /**
@@ -1004,7 +1181,9 @@ function construirRutaArchivo(metadata, tipoArchivo, extension) {
   const anio = fechaParsed?.anio || 'sin_anio';
   const mes = fechaParsed?.mes || 'sin_mes';
 
-  const segmentos = [org.CARPETA_RAIZ || 'descargas_sri'];
+  // Normalizada: una raiz invalida (C:\..., "..") haria que Chrome rechace la
+  // ruta y el archivo caiga suelto en Descargas
+  const segmentos = [sriNormalizarCarpetaRaiz(org.CARPETA_RAIZ)];
 
   // Niveles configurables: orden del RUC y fecha
   if (org.ORDEN === 'fecha_ruc') {
@@ -1078,11 +1257,14 @@ function calcularTiempoEstimado() {
  */
 function notificarFinalizacion() {
   // Priorizar el motivo del error si la descarga termino de forma anomala
-  const mensaje = estadoDescarga.error
+  let mensaje = estadoDescarga.error
     ? `Error: ${estadoDescarga.error}`
     : estadoDescarga.detenido
       ? `Detenido: ${estadoDescarga.exitosos} OK, ${estadoDescarga.fallidos} fallidos`
       : `Completado: ${estadoDescarga.exitosos} OK, ${estadoDescarga.fallidos} fallidos`;
+  if (estadoDescarga.avisos?.length) {
+    mensaje += `\nAviso: ${estadoDescarga.avisos.join(' ')}`;
+  }
 
   chrome.notifications.create({
     type: 'basic',
@@ -1127,6 +1309,8 @@ async function procesarDocumento(tabId, doc, tipoDescarga, pagina, origen = 'rec
   let exitoXml = null;
   let exitoPdf = null;
   let errorMsg = null;
+  // Formatos que solo se lograron por el metodo alternativo (fetch) en recibidos
+  const alternativos = [];
 
   try {
     // Metadata del documento para organizar archivos
@@ -1144,20 +1328,31 @@ async function procesarDocumento(tabId, doc, tipoDescarga, pagina, origen = 'rec
     // Descargar XML con reintentos. En emitidos no hay link en la pagina:
     // se obtiene el XML autorizado del web service con la clave de acceso.
     if (intentaXml) {
-      exitoXml = esEmitidos
-        ? await descargarXmlEmitidoConReintento(doc.claveAcceso, docMeta)
-        : await ejecutarConReintento(tabId, doc.linkXmlId, docMeta, 'xml');
-      if (!exitoXml) errorMsg = 'Error descargando XML';
+      if (esEmitidos) {
+        const r = await descargarXmlEmitidoConReintento(doc.claveAcceso, docMeta);
+        exitoXml = r.ok;
+        if (!r.ok) errorMsg = r.error || 'Error descargando XML';
+      } else {
+        // Recibidos: prima el metodo normal; fetch solo como respaldo
+        const r = await descargarRecibidoConRespaldo(tabId, doc.linkXmlId, docMeta, 'xml');
+        exitoXml = r.ok;
+        if (r.alternativa) alternativos.push('XML');
+        if (!r.ok) errorMsg = 'Error descargando XML';
+      }
       await delay(SRI_CONFIG.DELAY_DESCARGA);
     }
 
     // Descargar PDF con reintentos. En emitidos el submit del formulario
-    // responde 503 (ver descargarPdfEmitidoPorFetch): se usa fetch
+    // responde 503 (ver descargarPorFetch): se usa fetch como metodo principal
     if (intentaPdf) {
-      exitoPdf = esEmitidos
-        ? await descargarPdfEmitidoConReintento(tabId, doc.linkPdfId, docMeta)
-        : await ejecutarConReintento(tabId, doc.linkPdfId, docMeta, 'pdf');
-      if (!exitoPdf) errorMsg = errorMsg ? 'Error descargando XML y PDF' : 'Error descargando PDF';
+      if (esEmitidos) {
+        exitoPdf = await descargarPdfEmitidoConReintento(tabId, doc.linkPdfId, docMeta);
+      } else {
+        const r = await descargarRecibidoConRespaldo(tabId, doc.linkPdfId, docMeta, 'pdf');
+        exitoPdf = r.ok;
+        if (r.alternativa) alternativos.push('PDF');
+      }
+      if (!exitoPdf) errorMsg = errorMsg ? `${errorMsg}; error descargando PDF` : 'Error descargando PDF';
       await delay(SRI_CONFIG.DELAY_DESCARGA);
     }
 
@@ -1167,8 +1362,13 @@ async function procesarDocumento(tabId, doc, tipoDescarga, pagina, origen = 'rec
     errorMsg = e.message;
   }
 
-  // Exito si nada de lo intentado fallo
-  const exito = exitoXml !== false && exitoPdf !== false;
+  // Nada que intentar (el comprobante no tiene link para el formato pedido):
+  // no es un exito, no se descargo ningun archivo
+  const nadaQueIntentar = !intentaXml && !intentaPdf;
+  if (nadaQueIntentar) errorMsg = 'El comprobante no tiene enlace de descarga para el formato solicitado';
+
+  // Exito si se intento algo y nada de lo intentado fallo
+  const exito = !nadaQueIntentar && exitoXml !== false && exitoPdf !== false;
 
   if (exito) {
     estadoDescarga.exitosos++;
@@ -1185,11 +1385,15 @@ async function procesarDocumento(tabId, doc, tipoDescarga, pagina, origen = 'rec
     serie: doc.serie,
     fechaEmision: doc.fechaEmision,
     fechaAutorizacion: doc.fechaAutorizacion,
+    valorSinImpuestos: doc.valorSinImpuestos || '',
+    iva: doc.iva || '',
+    importeTotal: doc.importeTotal || '',
     pagina: pagina,
     exito: exito,
     exitoXml: exitoXml,
     exitoPdf: exitoPdf,
     error: errorMsg,
+    nota: alternativos.length > 0 ? `${alternativos.join(' y ')} por metodo alternativo (fetch)` : null,
     fechaDescarga: new Date().toISOString()
   });
 
@@ -1226,8 +1430,9 @@ async function procesarPaginasActuales(tabId, tipoDescarga, origen) {
   // total: si el usuario estaba parado en la ultima pagina (incompleta), el
   // conteo de esa pagina no sirve como "docs por pagina"
   if (datos.paginacion.actual > 1) {
-    await navegarPrimera(tabId);
-    await esperarCambioPagina(tabId, 1, origen);
+    if (!(await irAPagina(tabId, 1, origen))) {
+      return estadoDescarga.detenido ? null : 'El SRI no respondio al volver a la pagina 1. Vuelve a iniciar la descarga.';
+    }
     datos = await obtenerDatosPagina(tabId, origen);
     if (datos.error) return datos.error;
   }
@@ -1248,6 +1453,12 @@ async function procesarPaginasActuales(tabId, tipoDescarga, origen) {
     datos = await obtenerDatosPagina(tabId, origen);
     if (datos.error) return datos.error;
 
+    // La tabla debe mostrar la pagina que creemos estar procesando; si no,
+    // se descargarian (u omitirian) documentos de otra pagina
+    if (datos.paginacion.actual !== pag) {
+      return `La tabla del SRI muestra la pagina ${datos.paginacion.actual} cuando se esperaba la ${pag}. Vuelve a iniciar la descarga: lo ya descargado se omite.`;
+    }
+
     // Ajustar el total real al llegar a la ultima pagina (puede estar incompleta)
     if (pag === totalPaginas) {
       estadoDescarga.totalDocumentos = base + (pag - 1) * docsPorPagina + datos.documentos.length;
@@ -1262,12 +1473,12 @@ async function procesarPaginasActuales(tabId, tipoDescarga, origen) {
     // Guardar progreso parcial (protege contra terminacion del service worker)
     await guardarBufferAlStorage(false);
 
-    // Ir a siguiente pagina si hay mas
+    // Ir a siguiente pagina si hay mas. Si el SRI no llega a mostrarla (ni
+    // con reintentos) se aborta con un error visible: continuar reprocesaria
+    // la pagina anterior y dejaria las ultimas paginas sin descargar
     if (pag < totalPaginas && !estadoDescarga.detenido) {
-      await navegarSiguiente(tabId);
-      const cambioOk = await esperarCambioPagina(tabId, pag + 1, origen);
-      if (!cambioOk) {
-        await delay(SRI_CONFIG.DELAY_PAGINA);
+      if (!(await irAPagina(tabId, pag + 1, origen)) && !estadoDescarga.detenido) {
+        return `El SRI no respondio al pasar a la pagina ${pag + 1} de ${totalPaginas}. Vuelve a iniciar la descarga: lo ya descargado se omite y continuara con lo que falta.`;
       }
     }
   }
@@ -1276,35 +1487,17 @@ async function procesarPaginasActuales(tabId, tipoDescarga, origen) {
 }
 
 /**
- * Proceso principal de descarga: todas las paginas de la consulta en pantalla.
- * Corre en el background para sobrevivir al cierre del popup.
- * @param {number} tabId - Tab del SRI con la consulta ejecutada
+ * Crea el estado de una sesion nueva. Se asigna de forma SINCRONA al recibir
+ * el mensaje de inicio (antes de cualquier await) para que `activo` ya sea
+ * true si llega un segundo mensaje de inicio: asi no arrancan dos sesiones.
+ * @param {number} tabId - Tab del SRI
  * @param {'xml'|'pdf'|'ambos'} tipoDescarga - Formatos solicitados
- * @param {boolean} [ignorarHistorial=false] - true re-descarga todo (indice de dedup vacio)
- * @param {'recibidos'|'emitidos'} [origen='recibidos'] - Pantalla de origen
- * @returns {Promise<void>}
+ * @param {'recibidos'|'emitidos'} origen - Pantalla de origen
+ * @param {Object} [extra] - Campos adicionales (modo mes: diaActual, totalDias...)
+ * @returns {Object} Estado inicial de la sesion
  */
-async function descargarTodasLasPaginas(tabId, tipoDescarga, ignorarHistorial = false, origen = 'recibidos') {
-  // Cargar configuracion del usuario
-  await cargarConfigUsuario();
-
-  // Limpiar historial antiguo al iniciar (await para evitar carrera de
-  // escritura con el guardado incremental del buffer)
-  await limpiarHistorialAntiguo();
-
-  const sesionId = generarSesionId();
-
-  // Reiniciar buffer
-  bufferSesion = { documentos: [], rucUsuario: null };
-
-  // Construir indice de descargados para O(1) lookup (vacio si se ignora historial)
-  if (ignorarHistorial) {
-    indiceDescargados = new Set();
-  } else {
-    indiceDescargados = await construirIndiceDescargados(tipoDescarga);
-  }
-
-  estadoDescarga = {
+function crearEstadoSesion(tabId, tipoDescarga, origen, extra = {}) {
+  return {
     activo: true,
     detenido: false,
     exitosos: 0,
@@ -1317,34 +1510,102 @@ async function descargarTodasLasPaginas(tabId, tipoDescarga, ignorarHistorial = 
     tipoDescarga: tipoDescarga,
     origen: origen,
     tabId: tabId,
-    sesionId: sesionId,
+    sesionId: generarSesionId(),
     rucUsuario: null,
     timestampInicio: Date.now(),
     tiempoEstimado: null,
-    error: null
+    error: null,
+    avisos: [],
+    viaAlternativa: 0,
+    ...extra
   };
+}
+
+/**
+ * Preparacion comun de una sesion (despues de crearEstadoSesion): buffer,
+ * config del usuario, limpieza del historial antiguo e indice de dedup.
+ * Deja ademas una marca en chrome.storage.session para poder avisar si
+ * Chrome reinicia el service worker a mitad de la descarga.
+ * @param {boolean} usarHistorial - false = no deduplicar (indice vacio)
+ * @returns {Promise<void>}
+ */
+async function prepararSesion(usarHistorial) {
+  bufferSesion = { documentos: [], rucUsuario: null };
+  indiceDescargados = new Set();
+
+  chrome.storage.session?.set({
+    sesionEnCurso: { sesionId: estadoDescarga.sesionId, origen: estadoDescarga.origen, inicio: estadoDescarga.timestampInicio }
+  }).catch(() => {});
 
   actualizarBadge();
   notificarProgreso();
+
+  await cargarConfigUsuario();
+  // await para evitar carrera de escritura con el guardado incremental
+  await limpiarHistorialAntiguo();
+
+  if (usarHistorial) {
+    indiceDescargados = await construirIndiceDescargados(estadoDescarga.tipoDescarga);
+  }
+}
+
+/**
+ * Cierre comun de una sesion: guarda el buffer, arma los avisos finales,
+ * limpia estado temporal y notifica (popup, badge y notificacion de Chrome).
+ * @returns {Promise<void>}
+ */
+async function finalizarSesion() {
+  if (estadoDescarga.viaAlternativa > 0) {
+    agregarAviso(`${estadoDescarga.viaAlternativa} archivo(s) no respondieron al metodo normal y se descargaron por el metodo alternativo (fetch). Verifica que se abran correctamente.`);
+  }
+
+  await guardarBufferAlStorage(true);
+
+  downloadMetadataMap.clear();
+  pendingDataUrlMeta = null;
+
+  estadoDescarga.activo = false;
+  estadoDescarga.tiempoEstimado = null;
+  chrome.storage.session?.remove('sesionEnCurso').catch(() => {});
+
+  actualizarBadge();
+  notificarProgreso();
+  notificarFinalizacion();
+}
+
+// Al arrancar el service worker: si quedo la marca de una sesion en curso es
+// que Chrome lo reinicio a mitad de una descarga (el estado en memoria se
+// perdio y la descarga se corto). Avisar en vez de morir en silencio; lo
+// descargado hasta la ultima pagina completa ya esta en el historial.
+chrome.storage.session?.get('sesionEnCurso').then(({ sesionEnCurso }) => {
+  if (!sesionEnCurso || estadoDescarga.activo) return;
+  chrome.storage.session.remove('sesionEnCurso').catch(() => {});
+  estadoDescarga.origen = sesionEnCurso.origen || 'recibidos';
+  estadoDescarga.error = 'La descarga anterior se interrumpio porque el navegador reinicio la extension. Vuelve a iniciarla: lo ya descargado se omite.';
+  notificarProgreso();
+  notificarFinalizacion();
+}).catch(() => {});
+
+/**
+ * Proceso principal de descarga: todas las paginas de la consulta en pantalla.
+ * Corre en el background para sobrevivir al cierre del popup.
+ * @param {number} tabId - Tab del SRI con la consulta ejecutada
+ * @param {'xml'|'pdf'|'ambos'} tipoDescarga - Formatos solicitados
+ * @param {boolean} [ignorarHistorial=false] - true re-descarga todo (indice de dedup vacio)
+ * @param {'recibidos'|'emitidos'} [origen='recibidos'] - Pantalla de origen
+ * @returns {Promise<void>}
+ */
+async function descargarTodasLasPaginas(tabId, tipoDescarga, ignorarHistorial = false, origen = 'recibidos') {
+  // Sincrono (antes de cualquier await): marca la sesion como activa
+  estadoDescarga = crearEstadoSesion(tabId, tipoDescarga, origen);
+  await prepararSesion(!ignorarHistorial);
 
   const error = await procesarPaginasActuales(tabId, tipoDescarga, origen);
   if (error) {
     estadoDescarga.error = error;
   }
 
-  // Guardar buffer al storage
-  await guardarBufferAlStorage(true);
-
-  // Limpiar metadata map
-  downloadMetadataMap.clear();
-  pendingDataUrlMeta = null;
-
-  estadoDescarga.activo = false;
-  estadoDescarga.tiempoEstimado = null;
-
-  actualizarBadge();
-  notificarProgreso();
-  notificarFinalizacion();
+  await finalizarSesion();
 }
 
 /**
@@ -1358,42 +1619,14 @@ async function descargarTodasLasPaginas(tabId, tipoDescarga, ignorarHistorial = 
  * @returns {Promise<void>}
  */
 async function descargarSeleccionados(tabId, tipoDescarga, claves, origen = 'recibidos') {
-  await cargarConfigUsuario();
-  await limpiarHistorialAntiguo();
-
-  const sesionId = generarSesionId();
-  bufferSesion = { documentos: [], rucUsuario: null };
-  indiceDescargados = new Set();
-
-  estadoDescarga = {
-    activo: true,
-    detenido: false,
-    exitosos: 0,
-    fallidos: 0,
-    omitidos: 0,
-    paginaActual: 1,
-    totalPaginas: 1,
-    documentoActual: 0,
-    totalDocumentos: 0,
-    tipoDescarga: tipoDescarga,
-    origen: origen,
-    tabId: tabId,
-    sesionId: sesionId,
-    rucUsuario: null,
-    timestampInicio: Date.now(),
-    tiempoEstimado: null,
-    error: null
-  };
-
-  actualizarBadge();
-  notificarProgreso();
+  estadoDescarga = crearEstadoSesion(tabId, tipoDescarga, origen);
+  // Seleccion explicita del usuario: sin deduplicacion contra el historial
+  await prepararSesion(false);
 
   const datos = await obtenerDatosPagina(tabId, origen);
   if (datos.error) {
-    estadoDescarga.activo = false;
     estadoDescarga.error = datos.error;
-    actualizarBadge();
-    notificarProgreso();
+    await finalizarSesion();
     return;
   }
 
@@ -1411,16 +1644,7 @@ async function descargarSeleccionados(tabId, tipoDescarga, claves, origen = 'rec
     await procesarDocumento(tabId, doc, tipoDescarga, estadoDescarga.paginaActual, origen);
   }
 
-  await guardarBufferAlStorage(true);
-  downloadMetadataMap.clear();
-  pendingDataUrlMeta = null;
-
-  estadoDescarga.activo = false;
-  estadoDescarga.tiempoEstimado = null;
-
-  actualizarBadge();
-  notificarProgreso();
-  notificarFinalizacion();
+  await finalizarSesion();
 }
 
 /**
@@ -1570,10 +1794,35 @@ async function verificarSinDatosEmitidos(tabId) {
 }
 
 /**
- * Descarga los comprobantes emitidos de un mes completo. El formulario del
- * SRI solo acepta UNA fecha por consulta (no un rango), asi que se consulta
- * y descarga dia por dia. La iteracion llega solo hasta AYER: el SRI rechaza
- * consultar el dia en curso ("la fecha debe ser menor a la fecha actual").
+ * Selecciona el tipo de comprobante en el formulario de emitidos (MAIN world
+ * para que el evento change llegue al JSF de la pagina).
+ * @param {number} tabId - Tab del SRI
+ * @param {string} tipo - Value del select (ver SRI_CONFIG.TIPOS_EMITIDOS)
+ * @returns {Promise<'igual'|'cambiado'|'sin-opcion'|'sin-select'>}
+ */
+function setearTipoComprobanteEmitidos(tabId, tipo) {
+  return chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    world: 'MAIN',
+    func: (tipo, selector) => {
+      const sel = document.querySelector(selector);
+      if (!sel) return 'sin-select';
+      if (sel.value === tipo) return 'igual';
+      if (!Array.from(sel.options || []).some(o => o.value === tipo)) return 'sin-opcion';
+      sel.value = tipo;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'cambiado';
+    },
+    args: [tipo, SRI_CONFIG.SELECTORES.EMITIDOS_CMB_TIPO]
+  }).then(r => r[0]?.result || 'sin-select').catch(() => 'sin-select');
+}
+
+/**
+ * Consulta y descarga, dia por dia, los emitidos de un mes para el tipo de
+ * comprobante seleccionado en el formulario. El formulario del SRI solo
+ * acepta UNA fecha por consulta (no un rango). La iteracion llega solo hasta
+ * AYER: el SRI rechaza consultar el dia en curso ("la fecha debe ser menor a
+ * la fecha actual").
  *
  * Manejo por dia:
  * - 'vacio' (mensaje "No existen datos"): se salta al siguiente dia.
@@ -1581,50 +1830,16 @@ async function verificarSinDatosEmitidos(tabId) {
  *   datos", se salta el dia.
  * - Error de procesarPaginasActuales: solo se continua si en realidad fue un
  *   dia sin datos; cualquier otro fallo (sesion caida, cambio de pantalla)
- *   aborta el mes para no enmascarar errores reales.
- * La deduplicacion omite lo ya descargado salvo que ignorarHistorial sea true.
+ *   aborta para no enmascarar errores reales.
+ * Los fallos que abortan se dejan en estadoDescarga.error.
  * @param {number} tabId - Tab del SRI (debe estar en la pantalla de emitidos)
  * @param {'xml'|'pdf'|'ambos'} tipoDescarga - Formatos solicitados
- * @param {boolean} ignorarHistorial - Re-descargar aunque ya exista
  * @param {number} anio - Anio del mes a descargar
  * @param {number} mes - Mes 1-12
- * @returns {Promise<void>}
+ * @param {number} totalDias - Dias del mes
+ * @returns {Promise<number>} Cantidad de dias consultados
  */
-async function descargarEmitidosMes(tabId, tipoDescarga, ignorarHistorial, anio, mes) {
-  await cargarConfigUsuario();
-  await limpiarHistorialAntiguo();
-
-  const sesionId = generarSesionId();
-  bufferSesion = { documentos: [], rucUsuario: null };
-  indiceDescargados = ignorarHistorial ? new Set() : await construirIndiceDescargados(tipoDescarga);
-
-  const totalDias = new Date(anio, mes, 0).getDate();
-
-  estadoDescarga = {
-    activo: true,
-    detenido: false,
-    exitosos: 0,
-    fallidos: 0,
-    omitidos: 0,
-    paginaActual: 1,
-    totalPaginas: 1,
-    documentoActual: 0,
-    totalDocumentos: 0,
-    diaActual: 0,
-    totalDias: totalDias,
-    tipoDescarga: tipoDescarga,
-    origen: 'emitidos',
-    tabId: tabId,
-    sesionId: sesionId,
-    rucUsuario: null,
-    timestampInicio: Date.now(),
-    tiempoEstimado: null,
-    error: null
-  };
-
-  actualizarBadge();
-  notificarProgreso();
-
+async function descargarDiasEmitidos(tabId, tipoDescarga, anio, mes, totalDias) {
   // Iterar desde el dia 1 hasta UN DIA ANTES del actual: consultar el dia
   // en curso da error en el SRI
   const hoy = new Date();
@@ -1697,22 +1912,70 @@ async function descargarEmitidosMes(tabId, tipoDescarga, ignorarHistorial, anio,
     }
   }
 
-  // Caso borde: mes actual y hoy es dia 1 → no hay dias anteriores a hoy
+  return diasProcesados;
+}
+
+/**
+ * Descarga los comprobantes emitidos de un mes completo, consultando dia
+ * por dia (ver descargarDiasEmitidos). Con todosLosTipos recorre ademas
+ * todos los tipos de comprobante del formulario (SRI_CONFIG.TIPOS_EMITIDOS),
+ * repitiendo el mes para cada uno; si no, usa el tipo que este seleccionado
+ * en la pantalla.
+ * La deduplicacion omite lo ya descargado salvo que ignorarHistorial sea true.
+ * @param {number} tabId - Tab del SRI (debe estar en la pantalla de emitidos)
+ * @param {'xml'|'pdf'|'ambos'} tipoDescarga - Formatos solicitados
+ * @param {boolean} ignorarHistorial - Re-descargar aunque ya exista
+ * @param {number} anio - Anio del mes a descargar
+ * @param {number} mes - Mes 1-12
+ * @param {boolean} [todosLosTipos=false] - Recorrer todos los tipos de comprobante
+ * @returns {Promise<void>}
+ */
+async function descargarEmitidosMes(tabId, tipoDescarga, ignorarHistorial, anio, mes, todosLosTipos = false) {
+  const totalDias = new Date(anio, mes, 0).getDate();
+  const tipos = todosLosTipos ? Object.keys(SRI_CONFIG.TIPOS_EMITIDOS) : [null];
+
+  estadoDescarga = crearEstadoSesion(tabId, tipoDescarga, 'emitidos', {
+    diaActual: 0,
+    totalDias: totalDias,
+    tipoComprobante: null,   // nombre del tipo en curso (solo con todosLosTipos)
+    tipoActual: 0,
+    totalTipos: tipos.length
+  });
+  await prepararSesion(!ignorarHistorial);
+
+  let diasProcesados = 0;
+
+  for (let i = 0; i < tipos.length; i++) {
+    if (estadoDescarga.detenido || estadoDescarga.error) break;
+    const tipo = tipos[i];
+
+    if (tipo) {
+      estadoDescarga.tipoActual = i + 1;
+      estadoDescarga.tipoComprobante = SRI_CONFIG.TIPOS_EMITIDOS[tipo];
+      estadoDescarga.diaActual = 0;
+      notificarProgreso();
+
+      const cambio = await setearTipoComprobanteEmitidos(tabId, tipo);
+      if (cambio === 'sin-select') {
+        estadoDescarga.error = 'No se encontro el selector de tipo de comprobante. Verifica estar en la pantalla de emitidos.';
+        break;
+      }
+      // El formulario no ofrece este tipo: pasar al siguiente
+      if (cambio === 'sin-opcion') continue;
+      // Margen por si el cambio de tipo dispara AJAX propio
+      if (cambio === 'cambiado') await delay(800);
+    }
+
+    diasProcesados += await descargarDiasEmitidos(tabId, tipoDescarga, anio, mes, totalDias);
+  }
+
+  // Caso borde: mes actual y hoy es dia 1: no hay dias anteriores a hoy
   // que consultar; avisar en vez de terminar en silencio con 0 documentos
   if (diasProcesados === 0 && !estadoDescarga.detenido && !estadoDescarga.error) {
     estadoDescarga.error = 'El mes seleccionado no tiene dias anteriores a hoy para consultar.';
   }
 
-  await guardarBufferAlStorage(true);
-  downloadMetadataMap.clear();
-  pendingDataUrlMeta = null;
-
-  estadoDescarga.activo = false;
-  estadoDescarga.tiempoEstimado = null;
-
-  actualizarBadge();
-  notificarProgreso();
-  notificarFinalizacion();
+  await finalizarSesion();
 }
 
 // Escuchar mensajes del popup. Los handlers sincronos responden y retornan
@@ -1745,7 +2008,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ status: 'ocupado' });
       return false;
     }
-    descargarEmitidosMes(request.tabId, request.tipoDescarga, request.ignorarHistorial || false, request.anio, request.mes);
+    descargarEmitidosMes(request.tabId, request.tipoDescarga, request.ignorarHistorial || false, request.anio, request.mes, request.todosLosTipos === true);
     sendResponse({ status: 'iniciado' });
     return false;
   }
@@ -1795,7 +2058,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'limpiarHistorial') {
-    chrome.storage.local.remove(['historialDescargas'])
+    borrarHistorial()
       .then(() => sendResponse({ success: true }))
       .catch(e => sendResponse({ error: e.message }));
     return true;
@@ -1809,12 +2072,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'guardarConfig') {
-    chrome.storage.local.set({ sriConfig: request.config }).then(() => {
-      // Aplicar inmediatamente
-      cargarConfigUsuario().then(() => {
-        sendResponse({ success: true });
-      });
-    }).catch(e => sendResponse({ error: e.message }));
+    // La pestana Configuracion guarda tiempos/metodo SIN la seccion
+    // ORGANIZACION (y la pestana Organizacion la envia completa). Si no
+    // viene, se conserva la guardada: antes se perdia y la organizacion en
+    // carpetas quedaba desactivada al reiniciarse el service worker
+    chrome.storage.local.get(['sriConfig'])
+      .then((data) => {
+        const config = { ...request.config };
+        if (config.ORGANIZACION === undefined && data.sriConfig?.ORGANIZACION) {
+          config.ORGANIZACION = data.sriConfig.ORGANIZACION;
+        }
+        return chrome.storage.local.set({ sriConfig: config });
+      })
+      .then(() => cargarConfigUsuario()) // Aplicar inmediatamente
+      .then(() => sendResponse({ success: true }))
+      .catch(e => sendResponse({ error: e.message }));
     return true;
   }
 

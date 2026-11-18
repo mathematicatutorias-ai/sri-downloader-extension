@@ -55,6 +55,9 @@ const opcionesEmitidos = document.getElementById('opcionesEmitidos');
 /** Input type=date para la descarga mensual de emitidos: se descarga el MES
  *  completo de la fecha elegida (el dia solo sirve para abrir el datepicker) */
 const mesEmitidos = document.getElementById('mesEmitidos');
+/** Checkbox "Todos los tipos de comprobante" del modo mes de emitidos y su contenedor */
+const todosTiposEmitidos = document.getElementById('todosTiposEmitidos');
+const todosTiposWrap = document.getElementById('todosTiposWrap');
 /** Boton para iniciar descarga ignorando el historial (re-descarga todo) */
 const btnDescargarSinHistorial = document.getElementById('btnDescargarSinHistorial');
 /** Boton para descargar solo los documentos seleccionados de la pagina actual */
@@ -244,11 +247,14 @@ function actualizarUIEstado(estado, enVivo = false) {
 
     // Construir texto de progreso con dia (modo mes), pagina, exitosos, fallidos y omitidos
     let textoProgreso = '';
+    // Modo mes con "todos los tipos": tipo de comprobante en curso
+    if (estado.tipoComprobante) textoProgreso += `${estado.tipoComprobante} (${estado.tipoActual}/${estado.totalTipos}) - `;
     if (estado.totalDias) textoProgreso += `Dia ${estado.diaActual}/${estado.totalDias} - `;
     textoProgreso += `Pag ${estado.paginaActual}/${estado.totalPaginas} - `;
     textoProgreso += `${estado.exitosos} OK`;
     if (estado.fallidos > 0) textoProgreso += `, ${estado.fallidos} fallidos`;
     if (estado.omitidos > 0) textoProgreso += `, ${estado.omitidos} omitidos`;
+    if (estado.viaAlternativa > 0) textoProgreso += `, ${estado.viaAlternativa} por metodo alternativo`;
 
     // Agregar estimacion de tiempo restante si esta disponible
     const tiempoTexto = formatearTiempo(estado.tiempoEstimado);
@@ -291,21 +297,30 @@ function actualizarUIEstado(estado, enVivo = false) {
       }, 3000);
 
       // Mantener el mensaje de omitidos visible mas tiempo para que el usuario lo lea
-      // (si hubo error, el mensaje de error no se auto-oculta)
+      // (si hubo error o avisos, el mensaje no se auto-oculta)
+      const persistente = estado.error || estado.avisos?.length > 0;
       if (estado.exitosos === 0 && estado.fallidos === 0 && estado.omitidos > 0) {
-        setTimeout(() => { if (!estado.error) statusBox.style.display = 'none'; }, 8000);
+        setTimeout(() => { if (!persistente) statusBox.style.display = 'none'; }, 8000);
       } else {
-        setTimeout(() => { if (!estado.error) statusBox.style.display = 'none'; }, 3000);
+        setTimeout(() => { if (!persistente) statusBox.style.display = 'none'; }, 3000);
       }
     } else {
       // No hubo actividad previa, simplemente ocultar barra
       progressContainer.classList.remove('active');
     }
 
+    // Avisos de la sesion (ej. archivos bajados por el metodo alternativo,
+    // historial que no se pudo guardar): persistentes, en amarillo
+    if (estado.avisos?.length > 0 && !estado.error) {
+      const resumen = `${estado.detenido ? 'Detenido' : 'Completado'}: ${estado.exitosos} OK, ${estado.fallidos} fallidos.`;
+      mostrarEstado(`${resumen} Aviso: ${estado.avisos.join(' ')}`, 'warning');
+    }
+
     // Si la descarga termino con un error real (sesion caida, dia no
     // consultable, tab cerrada...), mostrarlo de forma persistente
     if (estado.error) {
-      mostrarEstado(`Error: ${estado.error}`, 'error');
+      const avisos = estado.avisos?.length > 0 ? ` Aviso: ${estado.avisos.join(' ')}` : '';
+      mostrarEstado(`Error: ${estado.error}${avisos}`, 'error');
     }
 
     // Restaurar estado de botones
@@ -438,7 +453,7 @@ async function cargarDocumentos() {
         }
         // Sincronizar visibilidad del selector de mes con el radio actual
         // (mes viene marcado por defecto en el HTML)
-        mesEmitidos.style.display = getRangoEmitidos() === 'mes' ? 'block' : 'none';
+        actualizarOpcionesMes();
         // Sin consulta en pantalla: avisar que el modo mes consulta solo
         if (documentos.length === 0) {
           mostrarEstado('No hay consulta en pantalla. Con "Mes completo" la extension consultara dia por dia automaticamente.', 'info');
@@ -507,6 +522,15 @@ async function consultarEstadoIva(tabId) {
   let estado = await preguntar();
   if (estado) return estado;
 
+  // iva.js solo vive en la app de devoluciones (adultos mayores y
+  // discapacidad): fuera de ella no se inyecta nada
+  let enDevoluciones = false;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    enDevoluciones = new URL(tab.url || '').pathname.startsWith(SRI_CONFIG.IVA.RUTA_APP);
+  } catch (e) { /* sin acceso a la URL */ }
+  if (!enDevoluciones) return null;
+
   try {
     await chrome.scripting.insertCSS({ target: { tabId }, files: ['iva.css'] });
     await chrome.scripting.executeScript({
@@ -572,6 +596,16 @@ function getRangoEmitidos() {
 }
 
 /**
+ * Muestra las opciones propias del modo mes de emitidos (selector de mes y
+ * "todos los tipos de comprobante") solo cuando ese modo esta elegido.
+ */
+function actualizarOpcionesMes() {
+  const esMes = getRangoEmitidos() === 'mes';
+  mesEmitidos.style.display = esMes ? 'block' : 'none';
+  todosTiposWrap.style.display = esMes ? 'flex' : 'none';
+}
+
+/**
  * Inicia la descarga segun la pantalla detectada (recibidos/emitidos).
  * - Recibidos: flujo clasico de todas las paginas.
  * - Emitidos por dia: igual, sobre lo consultado en pantalla.
@@ -597,12 +631,16 @@ async function iniciarDescarga(ignorarHistorial = false) {
     // Solo importan anio y mes: el dia elegido se descarta (se descarga el mes entero)
     const [anio, mes] = mesValor.split('-').map(Number);
     const mesTexto = `${String(mes).padStart(2, '0')}/${anio}`;
+    const todosLosTipos = todosTiposEmitidos.checked;
     mensaje = `Se descargaran los comprobantes emitidos (${tipoTexto}) de TODO el mes ${mesTexto}, consultando dia por dia.` +
+      (todosLosTipos
+        ? '\n\nTODOS los tipos de comprobante: se recorre el mes una vez por cada tipo (facturas, liquidaciones, notas de credito/debito, guias y retenciones).'
+        : '\n\nSolo el tipo de comprobante seleccionado en la pantalla del SRI.') +
       (ignorarHistorial
         ? '\n\nIGNORANDO el historial: se re-descargara todo aunque ya exista.'
         : '\n\nDocumentos ya descargados se omitiran automaticamente.') +
       '\n\n¿Continuar?';
-    payload = { action: 'iniciarDescargaEmitidosMes', tipoDescarga, ignorarHistorial, anio, mes };
+    payload = { action: 'iniciarDescargaEmitidosMes', tipoDescarga, ignorarHistorial, anio, mes, todosLosTipos };
   } else {
     if (documentos.length === 0) {
       mostrarEstado('No hay documentos consultados en pantalla. Usa "Mes completo" o ejecuta la consulta primero.', 'info');
@@ -728,9 +766,12 @@ btnDescargarTodo.addEventListener('click', iniciarDescargaTotal);
 
 /** Radios dia/mes de emitidos: mostrar el selector de mes solo en modo mes */
 document.querySelectorAll('input[name="rangoEmitidos"]').forEach(radio => {
-  radio.addEventListener('change', () => {
-    mesEmitidos.style.display = getRangoEmitidos() === 'mes' ? 'block' : 'none';
-  });
+  radio.addEventListener('change', actualizarOpcionesMes);
+});
+
+/** Recordar la preferencia "todos los tipos de comprobante" del modo mes */
+todosTiposEmitidos.addEventListener('change', () => {
+  chrome.storage.local.set({ emitidosTodosLosTipos: todosTiposEmitidos.checked });
 });
 
 /** Abrir el datepicker al hacer click en cualquier parte del input de fecha */
@@ -763,7 +804,10 @@ document.querySelectorAll('input[name="tipoDescarga"]').forEach(radio => {
 
 /** Filtros del historial: al cambiar el filtro (todos/exitosos/fallidos) recarga la vista */
 document.querySelectorAll('input[name="filtroHistorial"]').forEach(radio => {
-  radio.addEventListener('change', cargarHistorial);
+  radio.addEventListener('change', () => {
+    limiteHistorial = TANDA_HISTORIAL;
+    cargarHistorial();
+  });
 });
 
 /**
@@ -798,6 +842,8 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
       }
     } else if (tab === 'historial') {
       historialArea.style.display = 'block';
+      limiteHistorial = TANDA_HISTORIAL;
+      mostrarAvisoHistorial();
       cargarHistorial();
     } else if (tab === 'config') {
       configArea.style.display = 'block';
@@ -881,13 +927,19 @@ async function cargarHistorial() {
                              'No hay documentos en el historial';
       listaHistorial.appendChild(emptyMsg);
       resumenHistorial.style.display = 'none';
+      btnMasHistorial.style.display = 'none';
       return;
     }
 
-    // Renderizar cada documento del historial
+    // Renderizar el historial. Solo los mas recientes: con miles de
+    // registros crear todos los nodos volvia lento el popup; "Mostrar mas"
+    // amplia el limite
     listaHistorial.innerHTML = '';
+    const visibles = docs.slice(0, limiteHistorial);
+    btnMasHistorial.style.display = docs.length > visibles.length ? 'block' : 'none';
+    btnMasHistorial.textContent = `Mostrar mas (${docs.length - visibles.length} restantes)`;
 
-    docs.forEach(doc => {
+    visibles.forEach(doc => {
       const item = document.createElement('div');
       item.className = `fallido-item historial-item ${doc.exito ? 'exitoso' : 'fallido'}${doc.origen === 'emitidos' ? ' origen-emitidos' : ''}`;
 
@@ -928,6 +980,14 @@ async function cargarHistorial() {
         detalleDiv.appendChild(errorDiv);
       }
 
+      // Nota (ej. descargado por el metodo alternativo)
+      if (doc.nota) {
+        const notaDiv = document.createElement('div');
+        notaDiv.className = 'historial-nota';
+        notaDiv.textContent = doc.nota;
+        detalleDiv.appendChild(notaDiv);
+      }
+
       // Fecha de descarga + origen (emitido/recibido)
       const fechaDiv = document.createElement('div');
       fechaDiv.className = 'fallido-fecha';
@@ -943,7 +1003,35 @@ async function cargarHistorial() {
     const exitosos = docs.filter(d => d.exito).length;
     const fallidos = docs.filter(d => !d.exito).length;
     resumenHistorial.style.display = 'block';
-    resumenTexto.textContent = `Mostrando ${docs.length} documentos (${exitosos} exitosos, ${fallidos} fallidos)`;
+    resumenTexto.textContent = visibles.length < docs.length
+      ? `Mostrando los ${visibles.length} mas recientes de ${docs.length} documentos (${exitosos} exitosos, ${fallidos} fallidos)`
+      : `Mostrando ${docs.length} documentos (${exitosos} exitosos, ${fallidos} fallidos)`;
+  });
+}
+
+/** Cantidad de registros que se muestran por tanda en la pestana Historial */
+const TANDA_HISTORIAL = 200;
+/** Limite actual de registros visibles (crece con "Mostrar mas") */
+let limiteHistorial = TANDA_HISTORIAL;
+/** Boton "Mostrar mas" del historial */
+const btnMasHistorial = document.getElementById('btnMasHistorial');
+btnMasHistorial.addEventListener('click', () => {
+  limiteHistorial += TANDA_HISTORIAL;
+  cargarHistorial();
+});
+
+/**
+ * Muestra en la pestana Historial cuantos dias se conserva el registro
+ * (configurable). Pasado ese plazo los registros se borran solos y esos
+ * documentos volverian a descargarse en una descarga total.
+ */
+function mostrarAvisoHistorial() {
+  chrome.runtime.sendMessage({ action: 'obtenerConfig' }, (response) => {
+    const dias = response?.config?.DIAS_HISTORIAL ?? CONFIG_DEFAULTS.DIAS_HISTORIAL;
+    const meses = Math.round(dias / 30);
+    const plazo = dias >= 60 ? `${dias} dias (unos ${meses} meses)` : `${dias} dias`;
+    document.getElementById('avisoHistorial').textContent =
+      `Se conserva el historial de los ultimos ${plazo}. Los registros mas antiguos se eliminan automaticamente; puedes cambiar el plazo en Configuracion.`;
   });
 }
 
@@ -966,6 +1054,7 @@ async function limpiarHistorial() {
       listaHistorial.appendChild(msg);
       resumenHistorial.style.display = 'none';
       btnReintentarFallidos.style.display = 'none';
+      btnMasHistorial.style.display = 'none';
     }
   });
 }
@@ -994,7 +1083,14 @@ async function exportarHistorial() {
     };
 
     // Cabecera del CSV
-    filas.push(['Origen', 'RUC Emisor', 'Razon Social', 'Tipo Doc', 'Serie', 'Clave Acceso', 'Fecha Emision', 'Fecha Autorizacion', 'Estado', 'Error', 'Fecha Descarga'].join(','));
+    filas.push(['Origen', 'RUC Emisor', 'Razon Social', 'Tipo Doc', 'Serie', 'Clave Acceso', 'Fecha Emision', 'Fecha Autorizacion', 'Valor sin impuestos', 'IVA', 'Importe Total', 'Estado', 'Error', 'Nota', 'Fecha Descarga'].join(','));
+
+    // Importes tal como los muestra el SRI. Los registros anteriores a la
+    // v1.7.0 no los tienen (quedan vacios)
+    const celdaImporte = (v) => {
+      const texto = String(v || '').trim();
+      return /^[\d.,]+$/.test(texto) ? `"${texto}"` : celdaSegura(texto);
+    };
 
     // Recorrer toda la estructura del historial y generar filas CSV
     for (const ruc in historial) {
@@ -1010,8 +1106,12 @@ async function exportarHistorial() {
             doc.claveAcceso || '',
             doc.fechaEmision || '',
             doc.fechaAutorizacion || '',
+            celdaImporte(doc.valorSinImpuestos),
+            celdaImporte(doc.iva),
+            celdaImporte(doc.importeTotal),
             doc.exito ? 'OK' : 'FALLIDO',
             celdaSegura(doc.error),
+            celdaSegura(doc.nota),
             doc.fechaDescarga || ''
           ];
           filas.push(fila.join(','));
@@ -1106,31 +1206,19 @@ function mostrarModal(texto) {
  * @type {Object}
  */
 const CONFIG_DEFAULTS = {
-  /** Milisegundos de espera entre cada descarga individual */
-  DELAY_DESCARGA: 300,
-  /** Milisegundos maximo de espera por cada descarga antes de timeout */
-  TIMEOUT_DESCARGA: 5000,
-  /** Milisegundos de espera fallback al cambiar de pagina */
-  DELAY_PAGINA: 1500,
-  /** Milisegundos maximo de espera al cambiar de pagina */
-  TIMEOUT_PAGINA: 10000,
-  /** Milisegundos de espera entre reintentos de descarga fallida */
-  DELAY_REINTENTO: 1000,
-  /** Numero maximo de reintentos por descarga fallida */
-  MAX_REINTENTOS: 2,
-  /** Dias que se mantiene el historial antes de auto-limpieza */
-  DIAS_HISTORIAL: 30,
-  /** Configuracion por defecto de organizacion de archivos descargados */
-  ORGANIZACION: {
-    /** Si la organizacion en carpetas esta habilitada */
-    HABILITADO: false,
-    /** Nombre de la carpeta raiz donde se guardan las descargas */
-    CARPETA_RAIZ: 'descargas_sri',
-    /** Orden de las carpetas de RUC y fecha: 'ruc_fecha' (ruc/anio/mes) o 'fecha_ruc' (anio/mes/ruc) */
-    ORDEN: 'ruc_fecha',
-    /** Formato del nombre de archivo: 'claveAcceso', 'ruc_serie', o 'razon_serie' */
-    FORMATO_NOMBRE: 'claveAcceso'
-  }
+  // Tomados de config.js (popup.html lo carga antes que este script): una
+  // sola fuente de verdad. En el popup SRI_CONFIG nunca se modifica, asi que
+  // siempre contiene los valores de fabrica
+  DELAY_DESCARGA: SRI_CONFIG.DELAY_DESCARGA,
+  TIMEOUT_DESCARGA: SRI_CONFIG.TIMEOUT_DESCARGA,
+  DELAY_PAGINA: SRI_CONFIG.DELAY_PAGINA,
+  TIMEOUT_PAGINA: SRI_CONFIG.TIMEOUT_PAGINA,
+  DELAY_REINTENTO: SRI_CONFIG.DELAY_REINTENTO,
+  MAX_REINTENTOS: SRI_CONFIG.MAX_REINTENTOS,
+  DIAS_HISTORIAL: SRI_CONFIG.DIAS_HISTORIAL,
+  METODO_DESCARGA: SRI_CONFIG.METODO_DESCARGA,
+  /** Organizacion de archivos descargados (deshabilitada por defecto) */
+  ORGANIZACION: { ...SRI_CONFIG.ORGANIZACION }
 };
 
 // =====================================================
@@ -1144,7 +1232,9 @@ const CONFIG_DEFAULTS = {
 function obtenerOrganizacionUI() {
   return {
     HABILITADO: document.getElementById('cfgOrgHabilitado').checked,
-    CARPETA_RAIZ: document.getElementById('cfgCarpetaRaiz').value.trim() || 'descargas_sri',
+    // Normalizada a ruta relativa valida (sin C:\, "..", ni caracteres que
+    // Chrome rechaza): la vista previa muestra exactamente lo que se usara
+    CARPETA_RAIZ: sriNormalizarCarpetaRaiz(document.getElementById('cfgCarpetaRaiz').value),
     ORDEN: document.getElementById('cfgOrden').value || 'ruc_fecha',
     FORMATO_NOMBRE: document.querySelector('input[name="formatoNombre"]:checked')?.value || 'claveAcceso'
   };
@@ -1214,7 +1304,7 @@ function cargarConfigUI() {
     document.getElementById('cfgMaxReintentos').value = cfg.MAX_REINTENTOS ?? CONFIG_DEFAULTS.MAX_REINTENTOS;
     document.getElementById('cfgDiasHistorial').value = cfg.DIAS_HISTORIAL ?? CONFIG_DEFAULTS.DIAS_HISTORIAL;
     // Seleccionar el metodo de descarga guardado (mojarra por defecto)
-    const metodo = cfg.METODO_DESCARGA || 'mojarra';
+    const metodo = cfg.METODO_DESCARGA || CONFIG_DEFAULTS.METODO_DESCARGA;
     const metodoRadio = document.querySelector(`input[name="metodoDescarga"][value="${metodo}"]`);
     if (metodoRadio) metodoRadio.checked = true;
     configStatus.textContent = '';
@@ -1241,6 +1331,8 @@ function leerConfigNum(id, defecto) {
 /**
  * Lee los valores de configuracion desde los inputs del UI y los guarda
  * en el storage a traves del background service worker.
+ * No incluye la seccion ORGANIZACION: el background conserva la guardada
+ * (esta pestana no debe tocar la organizacion en carpetas).
  * Muestra mensaje de exito o error al finalizar.
  */
 function guardarConfig() {
@@ -1281,12 +1373,14 @@ function resetConfig() {
   document.getElementById('cfgDelayReintento').value = CONFIG_DEFAULTS.DELAY_REINTENTO;
   document.getElementById('cfgMaxReintentos').value = CONFIG_DEFAULTS.MAX_REINTENTOS;
   document.getElementById('cfgDiasHistorial').value = CONFIG_DEFAULTS.DIAS_HISTORIAL;
-  const mojarraRadio = document.querySelector('input[name="metodoDescarga"][value="mojarra"]');
-  if (mojarraRadio) mojarraRadio.checked = true;
+  const metodoRadio = document.querySelector(`input[name="metodoDescarga"][value="${CONFIG_DEFAULTS.METODO_DESCARGA}"]`);
+  if (metodoRadio) metodoRadio.checked = true;
 
-  // Guardar los defaults en storage
-  const resetConfig = { ...CONFIG_DEFAULTS, METODO_DESCARGA: 'mojarra' };
-  chrome.runtime.sendMessage({ action: 'guardarConfig', config: resetConfig }, (response) => {
+  // Guardar los defaults en storage. Sin ORGANIZACION: restaurar los tiempos
+  // no debe desactivar ni cambiar la organizacion en carpetas (esa seccion
+  // tiene su propio "Restaurar" en la pestana Organizacion)
+  const { ORGANIZACION, ...defaultsSinOrganizacion } = CONFIG_DEFAULTS;
+  chrome.runtime.sendMessage({ action: 'guardarConfig', config: defaultsSinOrganizacion }, (response) => {
     if (response?.success) {
       configStatus.textContent = 'Restaurado a valores por defecto';
       configStatus.style.color = '#2196f3';
@@ -1384,6 +1478,8 @@ async function guardarOrganizacion() {
     chrome.runtime.sendMessage({ action: 'guardarConfig', config }, (resp) => {
       const orgStatus = document.getElementById('orgStatus');
       if (resp?.success) {
+        // Reflejar la carpeta raiz tal como quedo guardada (normalizada)
+        document.getElementById('cfgCarpetaRaiz').value = orgConfig.CARPETA_RAIZ;
         orgStatus.textContent = 'Organizacion guardada';
         orgStatus.style.color = '#4caf50';
       } else {
@@ -1438,11 +1534,12 @@ document.querySelectorAll('input[name="formatoNombre"]').forEach(radio => {
  * en su ultima sesion, leyendo el valor guardado en chrome.storage.local.
  */
 async function restaurarTipoDescarga() {
-  const data = await chrome.storage.local.get(['ultimoTipoDescarga']);
+  const data = await chrome.storage.local.get(['ultimoTipoDescarga', 'emitidosTodosLosTipos']);
   if (data.ultimoTipoDescarga) {
     const radio = document.querySelector(`input[name="tipoDescarga"][value="${data.ultimoTipoDescarga}"]`);
     if (radio) radio.checked = true;
   }
+  todosTiposEmitidos.checked = data.emitidosTodosLosTipos === true;
 }
 
 // =====================================================
@@ -1567,30 +1664,29 @@ function renderSriMenu() {
   // En la pantalla de devolucion de IVA con la tabla de facturas: acceso al
   // asistente (el panel se abre solo, esto sirve para reabrirlo si se cerro)
   if (estadoIva?.hayTabla) {
-    const btnIva = document.createElement('a');
-    btnIva.className = 'sri-link sri-link-primary sri-link-iva sri-link-iva-activo';
-    btnIva.textContent = 'Abrir asistente de devolucion IVA';
-    btnIva.addEventListener('click', abrirAsistenteIva);
-    container.appendChild(btnIva);
+    container.appendChild(crearLinkSri(
+      'Abrir asistente de devolucion IVA',
+      'sri-link sri-link-primary sri-link-iva sri-link-iva-activo',
+      abrirAsistenteIva
+    ));
   }
 
   // Renderizar botones primarios destacados (recibidos / emitidos / IVA)
   SRI_MENU.filter(m => m.primary).forEach(primary => {
-    const btn = document.createElement('a');
-    btn.className = 'sri-link sri-link-primary';
-    btn.textContent = primary.nombre;
-    if (primary.esEmitidos) btn.classList.add('sri-link-emitidos');
-    if (primary.esIva) btn.classList.add('sri-link-iva');
+    let clases = 'sri-link sri-link-primary';
+    if (primary.esEmitidos) clases += ' sri-link-emitidos';
+    if (primary.esIva) clases += ' sri-link-iva';
+    let accion;
     if (primary.items) {
-      btn.addEventListener('click', () => renderSriSubmenu(primary));
+      accion = () => renderSriSubmenu(primary);
     } else if (primary.esEmitidos) {
       // Fallback para un primario de emitidos sin sub-items (actualmente
       // 'Descargar emitidos' siempre tiene items, asi que no se ejecuta)
-      btn.addEventListener('click', () => navegarSRIEmitidos(primary.url));
+      accion = () => navegarSRIEmitidos(primary.url);
     } else {
-      btn.addEventListener('click', () => navegarSRI(primary.url));
+      accion = () => navegarSRI(primary.url);
     }
-    container.appendChild(btn);
+    container.appendChild(crearLinkSri(primary.nombre, clases, accion));
   });
 
   // Renderizar grilla de categorias
@@ -1599,20 +1695,37 @@ function renderSriMenu() {
 
   SRI_MENU.forEach(item => {
     if (item.primary) return; // Saltar el primario ya renderizado
-    const btn = document.createElement('a');
-    btn.className = 'sri-link';
-    btn.textContent = item.nombre;
-    if (item.items) {
-      // Categoria con sub-items: abrir submenu
-      btn.addEventListener('click', () => renderSriSubmenu(item));
-    } else {
-      // Link directo: navegar a la URL
-      btn.addEventListener('click', () => navegarSRI(item.url));
-    }
-    grid.appendChild(btn);
+    // Categoria con sub-items: abrir submenu. Link directo: navegar a la URL
+    grid.appendChild(crearLinkSri(item.nombre, 'sri-link',
+      item.items ? () => renderSriSubmenu(item) : () => navegarSRI(item.url)));
   });
 
   container.appendChild(grid);
+}
+
+/**
+ * Crea un acceso del menu SRI. Son <a> sin href (estilo de enlace), asi que
+ * se les da rol de boton, foco con Tab y activacion con Enter/Espacio para
+ * que el menu se pueda usar con teclado.
+ * @param {string} texto - Texto visible
+ * @param {string} clases - Clases CSS
+ * @param {Function} accion - Handler al activar
+ * @returns {HTMLAnchorElement}
+ */
+function crearLinkSri(texto, clases, accion) {
+  const link = document.createElement('a');
+  link.className = clases;
+  link.textContent = texto;
+  link.tabIndex = 0;
+  link.setAttribute('role', 'button');
+  link.addEventListener('click', accion);
+  link.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      accion();
+    }
+  });
+  return link;
 }
 
 /**
@@ -1630,11 +1743,7 @@ function renderSriSubmenu(category) {
   const header = document.createElement('div');
   header.className = 'sri-submenu-header';
 
-  const backBtn = document.createElement('a');
-  backBtn.className = 'sri-back-btn';
-  backBtn.textContent = '\u2039 Volver';
-  backBtn.addEventListener('click', renderSriMenu);
-  header.appendChild(backBtn);
+  header.appendChild(crearLinkSri('\u2039 Volver', 'sri-back-btn', renderSriMenu));
 
   const title = document.createElement('div');
   title.className = 'sri-submenu-title';
@@ -1648,13 +1757,9 @@ function renderSriSubmenu(category) {
   grid.className = 'sri-links-grid';
 
   category.items.forEach(item => {
-    const btn = document.createElement('a');
-    btn.className = 'sri-link';
-    btn.textContent = item.nombre;
-    btn.addEventListener('click', () => item.esEmitidos
+    grid.appendChild(crearLinkSri(item.nombre, 'sri-link', () => item.esEmitidos
       ? navegarSRIEmitidos(item.url, item.tipoComprobante)
-      : navegarSRI(item.url, item.tipoComprobante));
-    grid.appendChild(btn);
+      : navegarSRI(item.url, item.tipoComprobante)));
   });
 
   container.appendChild(grid);
@@ -1725,6 +1830,8 @@ function detectarEdge() {
  * restaura las preferencias del usuario y carga los documentos de la pagina actual.
  */
 document.addEventListener('DOMContentLoaded', () => {
+  // Version tomada del manifest: un solo lugar que actualizar al publicar
+  document.getElementById('extVersion').textContent = chrome.runtime.getManifest().version;
   detectarEdge();
   restaurarTipoDescarga();
   cargarDocumentos();

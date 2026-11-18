@@ -38,6 +38,12 @@ body {
   box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
+/* Texto de los mensajes de estado (sin esto usaba los 16px por defecto) */
+.status-box p {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .status-box.error {
   background: #ffebee;
   border-left: 4px solid #f44336;
@@ -820,4 +826,34 @@ body.modo-emitidos .progress-fill { background: #009688; }
 @media (prefers-color-scheme: dark) {
   .sri-link-iva { background: #8e24aa; border-color: #8e24aa; }
   .sri-link-iva:hover { background: #6a1b9a; border-color: #6a1b9a; }
+}
+
+/* =====================================================
+   Historial: aviso de retencion y nota por documento
+   ===================================================== */
+
+.historial-aviso {
+  font-size: 10px;
+  color: #777;
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.historial-nota {
+  font-size: 10px;
+  color: #b26a00;
+}
+
+/* Foco visible para usar el menu de accesos directos con teclado */
+.sri-link:focus-visible,
+.sri-back-btn:focus-visible {
+  outline: 2px solid #1976d2;
+  outline-offset: 1px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .historial-aviso { color: #aaa; }
+  .historial-nota { color: #ffb74d; }
+  .sri-link:focus-visible,
+  .sri-back-btn:focus-visible { outline-color: #90caf9; }
 }

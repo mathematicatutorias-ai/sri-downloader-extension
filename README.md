@@ -31,6 +31,9 @@ tanto comprobantes **recibidos** como **emitidos**.
 - **Verificacion real**: Confirma que cada archivo se descargo via chrome.downloads API
 - **Espera inteligente**: Detecta cuando la pagina termina de cargar (polling, no delays fijos)
 - **Deduplicacion**: Omite documentos ya descargados (distingue XML y PDF por separado)
+- **Todos los tipos (emitidos)**: En el mes completo puede recorrer todos los tipos de comprobante en una sola pasada
+- **Cambio de pagina verificado**: Si el SRI no llega a mostrar la pagina siguiente se reintenta y, si no responde, se aborta con aviso (nunca se saltan paginas en silencio)
+- **Metodo alternativo en recibidos**: Si un archivo no baja por el metodo normal se intenta por fetch y se avisa al terminar
 
 ### Accesos directos SRI
 - **Menu de navegacion rapida**: Accesos directos a las secciones principales del portal SRI
@@ -48,7 +51,9 @@ tanto comprobantes **recibidos** como **emitidos**.
   el tipo de gasto (Vestimenta, Vivienda, Salud, Alimentacion, Educacion) segun el nombre comercial
 - **Modo automatico**: recorre todas las paginas; si todas quedaron con tipo de gasto pulsa
   "Procesar facturas seleccionadas", si no avisa cuantas faltan completar a mano
-- **Categorias personalizadas**: agrega nombres comerciales propios (tienen prioridad sobre las base)
+- **Categorias personalizadas**: agrega nombres comerciales propios (tienen prioridad sobre las base), con exportar/importar
+- **Envio opcional**: casilla para que el modo automatico no pulse "Procesar" y puedas revisar antes
+- Solo se carga en las pantallas de devolucion (adultos mayores y discapacidad)
 - Es una ayuda: el contribuyente debe revisar los datos antes de enviarlos al SRI
 
 ### Organizacion de archivos
@@ -63,7 +68,8 @@ tanto comprobantes **recibidos** como **emitidos**.
 - **Filtros**: Todo, exitosos o fallidos
 - **Exportar a CSV**: Exporta el registro completo
 - **Reintentar fallidos**: Re-descarga solo los documentos que fallaron
-- **Limpieza automatica**: Elimina registros antiguos (configurable, default 30 dias)
+- **Limpieza automatica**: Elimina registros antiguos (configurable, default 90 dias); la pestana Historial indica el plazo vigente
+- **Valores en el CSV**: Valor sin impuestos, IVA e importe total de cada comprobante
 
 ### Configuracion
 - **Tiempos ajustables**: Delay entre descargas, timeouts, delay de paginacion, delay de reintentos
@@ -138,9 +144,10 @@ tanto comprobantes **recibidos** como **emitidos**.
 | `scripting` | Ejecutar scripts para disparar descargas |
 | `downloads` | Verificar descargas + organizar en carpetas |
 | `storage` | Guardar historial, configuracion y preferencias |
+| `unlimitedStorage` | Que el historial de descargas no se corte al superar los 10 MB |
 | `notifications` | Notificar al completar descarga masiva |
 
-Hosts permitidos: `srienlinea.sri.gob.ec` (portal) y `cel.sri.gob.ec` / `celcer.sri.gob.ec`
+Hosts permitidos: `srienlinea.sri.gob.ec` (portal) y `cel.sri.gob.ec`
 (web service publico de autorizacion, usado para obtener el XML de los emitidos).
 
 ## Configuracion
@@ -156,7 +163,7 @@ Los valores se pueden ajustar desde la pestana **Configuracion** del popup, o di
 | `TIMEOUT_PAGINA` | 10000ms | Max espera cambio pagina |
 | `TIMEOUT_WS` | 15000ms | Max espera al web service de autorizacion (XML emitidos; solo en `config.js`) |
 | `MAX_REINTENTOS` | 2 | Reintentos por descarga fallida |
-| `DIAS_HISTORIAL` | 30 | Dias antes de auto-limpiar |
+| `DIAS_HISTORIAL` | 90 | Dias antes de auto-limpiar |
 
 ### Organizacion de archivos
 

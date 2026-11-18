@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Promocionales (datos ficticios)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; color: #fff; }
+  body { background: linear-gradient(115deg, #0f3f7f 0%, #1976d2 45%, #0b8fb0 75%, #009688 100%); position: relative; }
+  .burbuja { position: absolute; border-radius: 50%; background: rgba(255,255,255,.07); }
+  .icono { background: #fff; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 24px rgba(0,0,0,.25); flex: none; }
+  .chip { display: inline-block; border: 1px solid rgba(255,255,255,.45); background: rgba(255,255,255,.14); border-radius: 999px; font-weight: 600; white-space: nowrap; }
+  .chip.iva { background: rgba(106,27,154,.75); border-color: rgba(206,147,216,.8); }
+
+  /* ---------- Marquesina 1400x560 ---------- */
+  body.marquesina { width: 1400px; height: 560px; }
+  .marquesina .izq { position: absolute; left: 70px; top: 118px; width: 640px; }
+  .marquesina .titulo { display: flex; align-items: center; gap: 22px; }
+  .marquesina .icono { width: 78px; height: 78px; border-radius: 18px; }
+  .marquesina h1 { font-size: 42px; line-height: 1.08; font-weight: 700; text-shadow: 0 2px 10px rgba(0,0,0,.2); }
+  .marquesina .sub { font-size: 20px; margin: 22px 0 22px; opacity: .95; }
+  .marquesina .chips { display: flex; flex-wrap: wrap; gap: 10px; }
+  .marquesina .chip { font-size: 15px; padding: 8px 16px; }
+  .marquesina .cards { position: absolute; right: 56px; top: 150px; display: flex; gap: 18px; }
+  .card { width: 196px; background: #f7f8fa; border-radius: 12px; color: #333; box-shadow: 0 14px 36px rgba(0,0,0,.28); overflow: hidden; }
+  .card h3 { font-size: 13px; text-align: center; padding: 13px 0 11px; background: #fff; border-bottom: 2px solid var(--c); color: var(--c); }
+  .card .cuerpo { padding: 13px 13px 15px; font-size: 11px; }
+  .fila { display: flex; justify-content: space-between; margin-bottom: 9px; }
+  .fila b { color: #111; }
+  .prog { height: 7px; border-radius: 4px; background: #dfe1e5; margin: 4px 0 8px; overflow: hidden; }
+  .prog i { display: block; height: 100%; background: var(--c); }
+  .nota { text-align: center; font-size: 9.5px; color: #666; margin-bottom: 9px; }
+  .boton { background: var(--c); color: #fff; text-align: center; font-weight: 700; font-size: 11.5px; border-radius: 6px; padding: 9px 0; }
+  .lineas i { display: block; height: 5px; border-radius: 3px; background: #e3e5e9; margin-top: 8px; }
+  .gasto { display: flex; justify-content: space-between; align-items: center; background: #fff; border: 1px solid #e3e5e9; border-radius: 5px; padding: 5px 7px; margin-bottom: 5px; font-size: 10px; }
+  .gasto span { color: var(--c); font-weight: 700; }
+
+  /* ---------- Promocional pequena 440x280 ---------- */
+  body.pequena { width: 440px; height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+  .pequena .icono { width: 62px; height: 62px; border-radius: 15px; margin-bottom: 14px; }
+  .pequena h1 { font-size: 23px; font-weight: 700; text-shadow: 0 2px 8px rgba(0,0,0,.2); }
+  .pequena .sub { font-size: 13px; margin: 5px 0 14px; opacity: .95; }
+  .pequena .chips { display: flex; gap: 7px; }
+  .pequena .chip { font-size: 11.5px; padding: 5px 11px; }
+</style>
+</head>
+<body>
+<script>
+  const tipo = new URLSearchParams(location.search).get('tipo') || 'marquesina';
+  document.body.className = tipo;
+  const icono = (t) => `<div class="icono"><svg width="${t}" height="${t}" viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="4.5"><path d="M24 8v20M15 20l9 9 9-9" stroke="#1976d2"/><path d="M10 32v5a3 3 0 0 0 3 3h22a3 3 0 0 0 3-3v-5" stroke="#009688"/></svg></div>`;
+
+  if (tipo === 'pequena') {
+    document.body.innerHTML = `
+      <div class="burbuja" style="width:260px;height:260px;left:-90px;top:-110px"></div>
+      <div class="burbuja" style="width:220px;height:220px;right:-70px;bottom:-110px"></div>
+      ${icono(38)}
+      <h1>Descargador de Comprobantes SRI</h1>
+      <div class="sub">Descarga masiva de XML y PDF · Devolución de IVA</div>
+      <div class="chips"><span class="chip">XML</span><span class="chip">PDF</span><span class="chip">Recibidos</span><span class="chip">Emitidos</span><span class="chip iva">IVA</span></div>`;
+  } else {
+    document.body.innerHTML = `
+      <div class="burbuja" style="width:460px;height:460px;left:-250px;top:-300px"></div>
+      <div class="burbuja" style="width:420px;height:420px;left:700px;top:380px"></div>
+      <div class="izq">
+        <div class="titulo">${icono(46)}<h1>Descargador de<br>Comprobantes SRI</h1></div>
+        <div class="sub">Descarga masiva de XML y PDF — recibidos y emitidos — y asistente de devolución de IVA</div>
+        <div class="chips">
+          <span class="chip">Mes completo, día por día</span><span class="chip">Todos los tipos de comprobante</span>
+          <span class="chip">XML del web service oficial</span><span class="chip">Organización en carpetas</span>
+          <span class="chip">Sin duplicados</span><span class="chip">Historial + CSV</span><span class="chip iva">Devolución de IVA</span>
+        </div>
+      </div>
+      <div class="cards">
+        <div class="card" style="--c:#1976d2"><h3>Recibidos</h3><div class="cuerpo">
+          <div class="fila"><span>Documentos</span><b>75</b></div><div class="fila"><span>Página</span><b>3 de 5</b></div>
+          <div class="prog"><i style="width:72%"></i></div><div class="nota">54 OK · ~1:20 restantes</div>
+          <div class="boton">Descargar TODO</div><div class="lineas"><i></i><i style="width:65%"></i></div></div></div>
+        <div class="card" style="--c:#009688"><h3>Emitidos</h3><div class="cuerpo">
+          <div class="fila"><span>Rango</span><b>Mes completo</b></div><div class="fila"><span>Día</span><b>14 de 31</b></div>
+          <div class="prog"><i style="width:45%"></i></div><div class="nota">128 OK · XML + PDF</div>
+          <div class="boton">Descargar TODO</div><div class="lineas"><i></i><i style="width:65%"></i></div></div></div>
+        <div class="card" style="--c:#6a1b9a"><h3>Devolución de IVA</h3><div class="cuerpo">
+          <div class="gasto">Farmacia <span>Salud</span></div><div class="gasto">Ferretería <span>Vivienda</span></div><div class="gasto">Librería <span>Educación</span></div>
+          <div class="nota" style="margin-top:8px">IVA y tipo de gasto en un clic</div>
+          <div class="boton">Auto: todas las páginas</div></div></div>
+      </div>`;
+  }
+</script>
+</body>
+</html>

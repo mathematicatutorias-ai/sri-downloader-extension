@@ -1,19 +1,19 @@
 {
   "manifest_version": 3,
   "name": "Descargador de Comprobantes SRI",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Descarga masiva de comprobantes XML y PDF desde el portal SRI Ecuador y asistente para la devolucion de IVA",
   "permissions": [
     "activeTab",
     "scripting",
     "downloads",
     "storage",
+    "unlimitedStorage",
     "notifications"
   ],
   "host_permissions": [
     "https://srienlinea.sri.gob.ec/*",
-    "https://cel.sri.gob.ec/*",
-    "https://celcer.sri.gob.ec/*"
+    "https://cel.sri.gob.ec/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -31,7 +31,12 @@
   "content_scripts": [
     {
       "matches": ["https://srienlinea.sri.gob.ec/*"],
-      "js": ["config.js", "content.js", "iva-categorias.js", "iva.js"],
+      "js": ["config.js", "content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://srienlinea.sri.gob.ec/devolucionTerceraEdad-internet/*"],
+      "js": ["config.js", "iva-categorias.js", "iva.js"],
       "css": ["iva.css"],
       "run_at": "document_idle"
     }

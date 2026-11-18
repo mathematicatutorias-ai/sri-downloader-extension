@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Escenario de captura (datos ficticios)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1280px; height: 800px; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; background: #eef1f5; }
+  .tabs { height: 38px; background: #dee1e6; position: relative; }
+  .tab { position: absolute; left: 12px; bottom: 0; height: 30px; padding: 0 16px 0 14px; background: #fff; border-radius: 8px 8px 0 0; display: flex; align-items: center; gap: 8px; font-size: 12px; color: #333; }
+  .tab i { width: 14px; height: 14px; border-radius: 50%; background: #0b84a5; display: inline-block; }
+  .toolbar { height: 40px; background: #fff; display: flex; align-items: center; gap: 10px; padding: 0 12px; }
+  .nav { width: 24px; height: 24px; border-radius: 50%; background: #e8eaed; }
+  .url { flex: 1; height: 26px; border-radius: 13px; background: #f1f3f4; display: flex; align-items: center; gap: 8px; padding: 0 14px; font-size: 12px; color: #333; }
+  .lock { width: 9px; height: 8px; background: #e37400; border-radius: 2px; position: relative; }
+  .lock::before { content: ''; position: absolute; left: 1.5px; top: -5px; width: 4px; height: 5px; border: 1.5px solid #e37400; border-bottom: none; border-radius: 3px 3px 0 0; }
+  .ext { width: 22px; height: 22px; border-radius: 5px; background: linear-gradient(135deg, #1976d2, #009688); }
+  .page { position: absolute; top: 78px; left: 0; width: 1280px; height: 722px; background: #eef1f5; }
+  .portal { height: 46px; background: #0d3b8c; color: #fff; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; font-weight: 600; font-size: 15px; }
+  .portal small { font-weight: 400; font-size: 11px; text-align: right; line-height: 1.3; opacity: .9; }
+  .contenido { padding: 26px 30px; }
+  h2 { font-size: 21px; color: #1d2433; margin-bottom: 14px; }
+  table { width: 100%; border-collapse: collapse; background: #fff; font-size: 11.5px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  th { background: #1756a9; color: #fff; padding: 9px 8px; font-size: 11px; }
+  td { padding: 7px 8px; text-align: center; border-bottom: 1px solid #e6e9ee; color: #333; line-height: 1.35; }
+  .placeholder { background: #fff; border-radius: 10px; padding: 30px; height: 560px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  .barra { height: 14px; border-radius: 7px; background: #dfe3ea; margin-bottom: 14px; }
+  .velo { position: absolute; inset: 0; background: rgba(45, 55, 75, .34); }
+  #popup { position: absolute; top: 92px; right: 26px; width: 352px; height: 500px; border: 0; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.35); background: #f5f5f5; }
+  #ivaPage { position: absolute; top: 78px; left: 0; width: 1280px; height: 722px; border: 0; }
+</style>
+</head>
+<body>
+  <div class="tabs"><div class="tab"><i></i><span id="tabTitulo"></span></div></div>
+  <div class="toolbar"><div class="nav"></div><div class="nav"></div><div class="url"><span class="lock"></span><span id="url"></span></div><div class="ext"></div></div>
+  <div class="page" id="page"></div>
+
+<script>
+  const scene = new URLSearchParams(location.search).get('scene') || 'menu';
+  const RUC = '1790012345001';
+  const page = document.getElementById('page');
+  const set = (id, t) => { document.getElementById(id).textContent = t; };
+
+  const emisores = [
+    ['1790098765001', 'DISTRIBUIDORA ANDINA S.A.'], ['0990123456001', 'SERVICIOS COSTA CIA. LTDA.'],
+    ['1791234567001', 'IMPORTADORA SIERRA S.A.'], ['0992345678001', 'COMERCIAL DEL VALLE S.A.'],
+    ['1790876543001', 'TECNOLOGIA GLOBAL CIA. LTDA.'], ['0991987654001', 'TRANSPORTES UNIDOS S.A.'],
+    ['1792468135001', 'SUMINISTROS EXPRESS S.A.'], ['0993571246001', 'ALIMENTOS DEL PACIFICO S.A.']
+  ];
+
+  const portal = `<div class="portal"><span>Portal Tributario</span><small>${RUC}<br>COMERCIAL EJEMPLO S.A.</small></div>`;
+
+  function tablaRecibidos() {
+    const filas = emisores.map(([ruc, razon], i) => `<tr><td>${i + 1}</td><td>${ruc}<br>${razon}</td><td>${i === 3 ? 'Retencion' : 'Factura'} 00${1 + (i % 3)}-001-0000${45821 + i * 137}</td><td>0${i + 1}07202601${ruc}2001001000004582${i}0000000${i}1${i}</td><td>0${i + 1}/07/2026 10:15:00</td><td>0${i + 1}/07/2026</td><td>${(100 + i * 12.5).toFixed(2)}</td></tr>`).join('');
+    return `<h2>Comprobantes electrónicos recibidos</h2><table><tr><th>Nro</th><th>RUC y Razón social emisor</th><th>Tipo y serie</th><th>Clave de acceso</th><th>Fecha autorización</th><th>Fecha emisión</th><th>Valor</th></tr>${filas}</table>`;
+  }
+
+  function tablaEmitidos() {
+    const filas = Array.from({ length: 8 }, (_, i) => `<tr><td>${i + 1}</td><td>Factura 001-001-0000249${81 + i}</td><td>140720260${RUC}20010010000249${81 + i}000000001${i}</td><td>14/07/2026 09:${10 + i}:00</td><td>14/07/2026</td><td>${(250 + i * 20).toFixed(2)}</td></tr>`).join('');
+    return `<h2>Comprobantes electrónicos emitidos</h2><table><tr><th>Nro</th><th>Tipo y serie</th><th>Clave de acceso / Nro. Autorización</th><th>Fecha autorización</th><th>Fecha emisión</th><th>Valor</th></tr>${filas}</table>`;
+  }
+
+  const anchos = [42, 78, 72, 58, 40];
+  const placeholder = `<div class="placeholder">${anchos.map(a => `<div class="barra" style="width:${a}%"></div>`).join('')}</div>`;
+
+  if (scene === 'iva') {
+    set('tabTitulo', 'SRI - Devolución de IVA');
+    set('url', 'srienlinea.sri.gob.ec/devolucionTerceraEdad-internet');
+    page.remove();
+    const f = document.createElement('iframe');
+    f.id = 'ivaPage';
+    f.src = 'iva_page.html';
+    document.body.appendChild(f);
+  } else {
+    const cfg = {
+      recibidos: ['SRI - Comprobantes electronicos', 'srienlinea.sri.gob.ec/comprobantes-electronicos-internet', tablaRecibidos()],
+      historial: ['SRI - Comprobantes electronicos', 'srienlinea.sri.gob.ec/comprobantes-electronicos-internet', tablaRecibidos()],
+      emitidos: ['SRI - Comprobantes electronicos', 'srienlinea.sri.gob.ec/comprobantes-electronicos-internet', tablaEmitidos()],
+      menu: ['SRI en Linea', 'srienlinea.sri.gob.ec/sri-en-linea', placeholder]
+    }[scene];
+    set('tabTitulo', cfg[0]);
+    set('url', cfg[1]);
+    page.innerHTML = `${portal}<div class="contenido">${cfg[2]}</div><div class="velo"></div>`;
+    const popup = document.createElement('iframe');
+    popup.id = 'popup';
+    popup.src = `popup_mock.html?scene=${scene}`;
+    document.body.appendChild(popup);
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.popupAlto) popup.style.height = Math.min(e.data.popupAlto, 690) + 'px';
+    });
+  }
+</script>
+</body>
+</html>
