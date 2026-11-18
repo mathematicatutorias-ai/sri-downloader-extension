@@ -5,7 +5,7 @@ Extension de Chrome (Manifest V3) para descargar documentos XML/PDF del SRI Ecua
 tanto comprobantes RECIBIDOS como EMITIDOS. Organiza archivos en carpetas
 configurables, ofrece accesos directos al portal SRI e incluye un asistente
 para la devolucion de IVA (adultos mayores / personas con discapacidad).
-Version: 1.7.0 | Dominio: `srienlinea.sri.gob.ec` (+ WS `cel.sri.gob.ec`)
+Version: 1.7.5 | Dominio: `srienlinea.sri.gob.ec` (+ WS `cel.sri.gob.ec`)
 
 ## Estructura de archivos
 ```
@@ -14,10 +14,10 @@ sri-downloader-extension/
 ├── config.js          # Constantes compartidas (delays, selectores, timeouts, organizacion)
 ├── background.js      # Service Worker - descargas, organizacion archivos, navegacion SRI
 ├── content.js         # Content Script - extractor de datos DOM (~120 lineas)
-├── iva.js             # Content Script - panel asistente devolucion de IVA
-├── iva.css            # Estilos del panel IVA (inyectado en la pagina del SRI)
+├── iva.js             # Content Script - asistente devolucion de IVA (sin UI: la UI esta en el popup)
+├── iva.css            # Estilos de los avisos flotantes del asistente IVA (inyectado en la pagina del SRI)
 ├── iva-categorias.js  # Categorias base nombre comercial -> tipo de gasto
-├── popup.html         # UI del popup (4 tabs + accesos directos SRI + modal)
+├── popup.html         # UI del popup (4 tabs + accesos directos SRI + asistente IVA + modal)
 ├── popup.js           # Logica del popup (menu SRI, config, organizacion, historial)
 ├── popup.css          # Estilos (light + dark mode + tema verde agua emitidos)
 ├── icons/             # Iconos PNG y SVG (16, 48, 128)
@@ -192,17 +192,82 @@ sri-downloader-extension/
   discapacidad en `pages/personasDiscapacidad/...` y adultos mayores en
   `pages/terceraEdad/procesarDTE.jsf`, verificado en vivo), tras config.js + iva-categorias.js;
   guard `window.SRI_IVA_LOADED`. Selectores en `SRI_CONFIG.IVA`
-- Popup: apartado primario "Devolucion de IVA" (morado) con SOLO dos opciones:
-  Personas con discapacidad (`redireccion=130`) y Adultos mayores (`redireccion=129`).
-  Solo navegan; no hay logica de background
-- La app de discapacidad cae en `devolucionTerceraEdad-internet/pages/personasDiscapacidad/
-  procesarPersonasDiscapacidad.jsf`: pantalla de condiciones (Si/No) -> seleccion de
-  cuenta bancaria de acreditacion -> periodo -> tabla de facturas
-- El panel se abre SOLO cuando aparece `[id$='tblFacturas_data']` (MutationObserver con
-  debounce 500 ms; la consulta es AJAX). Si el usuario lo cierra (x) no se reabre solo
-  en esa pagina; el popup muestra "Abrir asistente de devolucion IVA" cuando hay tabla
+- Menu del popup: "Devolucion de IVA" va en la grilla como los demas apartados
+  (primero, antes de Claves) con tres opciones: Personas con discapacidad
+  (`redireccion=130`), Adultos mayores (`redireccion=129`) y "Asistente y
+  categorias" (abre la vista del asistente desde cualquier pagina, para
+  administrar las categorias). No hay logica de background
+- **Sin panel en la pagina**: la interfaz es la vista "Asistente devolucion IVA"
+  del popup (`#ivaArea`, tema morado `body.modo-iva`), que se abre sola cuando
+  `ivaEstado` informa tabla de facturas, pantalla de periodos o proceso en
+  curso. El popup es un control remoto: envia acciones y sondea `ivaEstado`
+  cada 500 ms; el trabajo corre en iva.js y sigue con el popup cerrado. En la
+  pagina iva.js solo dibuja avisos (`#sri-iva-notificacion`): centrados para el
+  resultado de un proceso, `mini` (abajo) para lo demas
+- El log vive en memoria en iva.js y viaja incremental (`logGen` cambia al
+  limpiar o recargar la pagina; `logDesde`/`logTotal` son indices absolutos)
+- Las categorias y las casillas (`ivaAutoProcesar`, `ivaAutoBuscar`) las escribe
+  el popup en `chrome.storage.local`; iva.js se entera por `storage.onChanged`
+- Flujo de la app de discapacidad (verificado en vivo 2026-11, todo en
+  `devolucionTerceraEdad-internet/pages/personasDiscapacidad/procesarPersonasDiscapacidad.jsf`):
+  condiciones (`frmCiudad:btnContinuar` "Si") -> cuenta bancaria (radio en
+  `tblConvenios_data` + Aceptar) -> menu ("Ingresar facturas electronicas" /
+  "Envio de solicitud") -> pantalla de anio/periodo -> tabla de facturas. Los
+  pasos son AJAX salvo "Volver a intentar", que recarga la pagina
+- El SRI ahora precarga el IVA de cada comprobante (lo dice su pantalla de
+  condiciones); el asistente igual lo rellena
 - Por fila: click en `.ui-chkbox-box`, `txtIvaSolicitado` = IVA de la celda 5, tipo de
-  gasto via trigger del SelectOneMenu + click en `li` (fallback: select oculto + label)
+  gasto via trigger del SelectOneMenu + click en `li` (`elegirEnMenu`; fallback:
+  select oculto + label)
+- **Aprendizaje de categorias** (`revisarSelecciones` / `aprenderCategoria`):
+  si el usuario elige a mano el tipo de gasto de un proveedor sin categoria,
+  se guarda como personalizada con su nombre comercial completo (aviso `mini`
+  en la pagina). Si esa misma clave ya existe se actualiza; si el proveedor
+  esta cubierto por otra categoria (base o personalizada parcial) no se toca.
+  Se detecta comparando el valor del select de cada fila con el ultimo visto
+  (Map `tiposVistos`), NO con el evento `change`: PrimeFaces lo dispara con
+  jQuery `.trigger()`, que no llega a los listeners nativos del content
+  script. Los cambios hechos por el asistente (`autoRunning`) no se aprenden
+- **Busqueda de periodos pendientes** (`buscarPeriodosPendientes`, verificada en
+  vivo): en la pantalla de anio/periodo (`cmbAnio*_input`, `cmbPeriodo*_input`,
+  `btnBuscarComprobantesElectronicos*`) consulta empezando por el anio mas
+  reciente y, dentro de cada anio, de enero en adelante (asi lo pidio el
+  usuario: "desde este anio, desde enero"); luego el anio anterior. Buscar
+  responde en ~0.3-1 s con la tabla (pendiente: la busqueda se detiene ahi) o
+  con "No se puede continuar con la carga de informacion" + motivo: "Ya esta
+  en tramite..." (`tramite`), "no se encontraron facturas..." (`sinFacturas`)
+  u otro (`otro`, se muestra tal cual). "Volver a intentar" RECARGA la pagina
+  y reinicia iva.js: el avance vive en `sessionStorage` (`sriIvaBusqueda`, por
+  pestana, por usuario, vigencia 1 h) y `revisarPeriodos` la reanuda al cargar
+  - Los pasos previos (condiciones "Si" y cuenta bancaria) los hace la
+    persona; el asistente actua desde la pantalla de anio/periodo
+  - Arranca sola al llegar a la pantalla (casilla `ivaAutoBuscar`), salvo que
+    el usuario la haya detenido o ya este completa; "Buscar" del popup empieza
+    de cero. En ese momento iva.js pide abrir el popup (`ivaAbrirPopup` ->
+    background -> `chrome.action.openPopup`, Chrome 127+, solo si la pestana
+    esta activa; si falla no pasa nada, quedan los avisos de la pagina). Lo
+    pide tambien al encontrar un periodo pendiente
+  - **La tabla de facturas aparece en la MISMA pantalla que los selectores de
+    anio/periodo** (debajo). Por eso: `enSoloPeriodos()` (selectores sin
+    tabla) decide el arranque automatico; con una tabla a la vista no se
+    busca solo (cambiar de periodo descarta lo seleccionado, verificado); y
+    `consultarPeriodo` reconoce la respuesta por un tbody NUEVO, no por que
+    exista tabla
+  - Los `<li>` de un SelectOneMenu se crean recien al abrir su panel (y tras
+    cada re-render AJAX vuelve a estar vacio): `elegirEnMenu` espera a que
+    aparezcan
+  - Alcance: los `ANIOS_BUSQUEDA` (2) anios mas recientes; "Buscar tambien en
+    los anios anteriores" sigue con todos sin repetir lo consultado
+  - Al cambiar de anio hay que esperar a que el AJAX REEMPLACE el select de
+    periodos (PrimeFaces pone el valor en el select viejo al instante)
+  - Al volver a la pantalla tras un periodo pendiente se re-consulta ESE
+    periodo una vez (si ya se proceso pasa a `tramite`) y luego sigue con los
+    anteriores
+  - Una interrupcion (el SRI no responde, pantalla inesperada) deja la
+    busqueda `detenida`: sin eso se reanudaria sola y reintentaria sin fin
+  - En adultos mayores (`pages/terceraEdad/procesarDTE.jsf`) el boton "Volver
+    a intentar" no tiene id fijo (`j_idtNNN`): se busca tambien por texto. Sus
+    pantallas de periodo/tabla no se han visto (el usuario de prueba no califica)
 - Categoria por `includes()` del nombre comercial (celda 2): personalizadas
   (`chrome.storage.local.ivaCategoriasCustom`) primero, luego `IVA_CATEGORIAS_BASE`
 - Modo auto: pagina 1 -> todas; si 0 incompletas pulsa `btnGuardarFacturasSeleccionadas`
@@ -215,9 +280,20 @@ sri-downloader-extension/
   "RM" coincidia con "HERMANOS" y clasificaba mal). Compara sin tildes
 - Casilla "Procesar automaticamente al terminar el modo auto" (`ivaAutoProcesar`,
   activada por defecto); desactivada deja todo listo sin enviar
-- Exportar/Importar categorias personalizadas en JSON `{"NOMBRE": "4"}`
-- Probado con tabla simulada (`docs/mocks/iva_page.html`); la tabla real de
-  facturas no se ha visto en vivo (se asumen los selectores de la extension vieja)
+- Exportar/Importar categorias personalizadas en JSON `{"NOMBRE": "4"}` (desde
+  el popup; cada categoria de la lista permite cambiar su tipo de gasto)
+- Tabla real de facturas verificada en vivo (2026-11, discapacidad):
+  `j_idt164:tblFacturas_data`, 10 filas por pagina, paginador "(1 of 4)".
+  Columnas: 0 No. | 1 RIDE | 2 Nombre comercial / razon social (label) |
+  3 Tipo y serie | 4 Fecha | 5 Monto IVA (label) | 6 `txtIvaSolicitado` |
+  7 `cmbTipoGasto` | 8 Seleccionar (`.ui-chkbox-box`). El IVA solicitado y el
+  tipo de gasto estan deshabilitados hasta marcar la fila (el checkbox los
+  re-renderiza por AJAX; `clickCheckbox` espera a que se habiliten). Values
+  del tipo de gasto: 4 alimentacion, 5 educacion, 3 salud, 1 vestimenta,
+  2 vivienda. "Rellenar esta pagina" y el aprendizaje de categorias se
+  probaron ahi (elegir en el menu real NO emite `change` nativo). El modo
+  auto y "Procesar" no se probaron en vivo (envian la solicitud)
+- Tambien hay pruebas con tabla simulada (`docs/mocks/iva_page.html`)
 
 ## Mensajes entre componentes
 
@@ -241,11 +317,20 @@ sri-downloader-extension/
 | Mensaje | Descripcion |
 |---------|-------------|
 | `obtenerDocumentos` | Extrae documentos de la tabla actual (content.js) |
-| `ivaEstado` | `{hayTabla, panelAbierto, procesando}` del asistente IVA (iva.js) |
-| `ivaAbrirPanel` | Abre el panel del asistente IVA en la pagina (iva.js) |
+| `ivaEstado` | Estado del asistente IVA: `{hayTabla, enPeriodos, procesando, hayPaginaSiguiente, status, busqueda, logGen, logDesde, logTotal, log}` (iva.js) |
+| `ivaRellenarPagina` / `ivaSiguientePagina` / `ivaAuto` | Rellenar la pagina visible, pasar de pagina, modo automatico |
+| `ivaBuscarPeriodos` | `{todos}`: busca periodos pendientes (false = de cero en los anios recientes; true = sigue con todos los anios) |
+| `ivaAbrirPeriodo` | `{anio, periodo}`: consulta ese periodo y deja su tabla en pantalla |
+| `ivaDetener` / `ivaLimpiarLog` | Detiene el proceso o la busqueda en curso; limpia el registro |
 
-Cada listener responde SOLO a sus acciones: responder error a acciones ajenas
-pisaria la respuesta del otro content script.
+Todas las acciones `iva*` llevan `{logGen, logDesde}` y responden con el estado
+actualizado. Cada listener responde SOLO a sus acciones: responder error a
+acciones ajenas pisaria la respuesta del otro content script.
+
+### Content Script -> Background
+| Mensaje | Descripcion |
+|---------|-------------|
+| `ivaAbrirPopup` | iva.js pide abrir el popup sobre su pestana (pantalla de periodos o periodo pendiente encontrado) |
 
 ### Background -> Popup
 | Mensaje | Descripcion |
@@ -548,13 +633,15 @@ Nota: los cambios de permisos alargan la revision (dias en vez de horas).
 
 ### Regenerar las imagenes promocionales
 `python docs/mocks/generar.py` (requiere Chrome y Pillow). Renderiza con Chrome
-headless el popup y el panel de IVA REALES sobre un portal simulado con datos
+headless el popup REAL (y `iva.js` real sobre una pantalla de devolucion simulada) en un portal con datos
 ficticios (RUC 1790012345001, "COMERCIAL EJEMPLO S.A."; nunca capturas de sesion
 real) y deja en `docs/` los PNG en RGB 24 bits sin alfa, al tamano exacto.
 - `docs/mocks/stage.html`: marco de navegador + portal ficticio + popup en iframe
   (`?scene=recibidos|emitidos|menu|historial|iva`)
 - `docs/mocks/mock_chrome.js`: mock de `chrome.*` con los datos de cada escena
+  (en `iva` responde `ivaEstado` con un estado fijo del asistente)
 - `docs/mocks/iva_page.html`: pantalla de devolucion simulada con `iva.js` real
+  (le envia `ivaRellenarPagina` como lo haria el popup)
 - `docs/mocks/promo.html`: marquesina y promocional pequena (`?tipo=`)
 Si cambia la UI basta volver a ejecutar el script; si cambian los mensajes que
 usa el popup (`obtenerEstado`, `obtenerHistorial`...) hay que ajustar el mock.

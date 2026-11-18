@@ -1,8 +1,9 @@
 """Regenera las imagenes de la Chrome Web Store (capturas + promocionales).
 
-Renderiza el popup y el panel de IVA REALES de la extension sobre un portal
-simulado con datos FICTICIOS (nunca capturas de una sesion real), usando
-Chrome en modo headless, y deja los PNG en docs/ como RGB de 24 bits sin alfa.
+Renderiza el popup REAL de la extension (y iva.js REAL rellenando una pantalla
+de devolucion simulada) sobre un portal con datos FICTICIOS (nunca capturas de
+una sesion real), usando Chrome en modo headless, y deja los PNG en docs/ como
+RGB de 24 bits sin alfa.
 
 Uso (desde la raiz del repo):
     python docs/mocks/generar.py

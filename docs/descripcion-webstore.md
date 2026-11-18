@@ -15,8 +15,10 @@ Características principales:
 - Todos los tipos de comprobante: En el mes completo de emitidos puedes descargar de una sola vez facturas, liquidaciones de compra, notas de crédito, notas de débito, guías de remisión y retenciones.
 - Consulta automática: Al navegar a emitidos desde el menú, la extensión ejecuta la consulta por ti; no necesitas llenar el formulario.
 - Formatos: Elige entre XML, PDF o ambos (recuerda tu última selección).
-- Asistente de devolución de IVA: En las pantallas de devolución de IVA para adultos mayores y personas con discapacidad, un panel marca cada factura, rellena el IVA solicitado y asigna el tipo de gasto (salud, alimentación, vivienda, vestimenta, educación) según el comercio. El modo automático recorre todas las páginas y solo procesa la solicitud si todas las facturas quedaron completas. Puedes agregar tus propios comercios, exportarlos e importarlos, y decidir si el envío final es automático o lo revisas tú antes.
-- Accesos directos SRI: Botones "Descargar recibidos", "Descargar emitidos" y "Devolución de IVA", más navegación rápida a Declaraciones, RUC, Claves y otras secciones del portal. Pre-configura automáticamente el formulario.
+- Asistente de devolución de IVA: En las pantallas de devolución de IVA para adultos mayores y personas con discapacidad, la extensión marca cada factura, rellena el IVA solicitado y asigna el tipo de gasto (salud, alimentación, vivienda, vestimenta, educación) según el comercio. El modo automático recorre todas las páginas y solo procesa la solicitud si todas las facturas quedaron completas. Se maneja desde la ventana de la extensión, sin paneles que tapen la página, y sigue trabajando aunque la cierres.
+- Períodos pendientes: Al llegar a la pantalla de año y período, la ventana de la extensión se abre sola y el asistente busca por ti, empezando por enero, el primer período que todavía no has procesado.
+- Comercios que se aprenden solos: Cuando eliges a mano el tipo de gasto de un comercio que el asistente no conocía, lo recuerda para la próxima vez. También puedes agregar tus propios comercios, exportarlos e importarlos, y decidir si el envío final es automático o lo revisas tú antes.
+- Accesos directos SRI: Botones "Descargar recibidos" y "Descargar emitidos", más navegación rápida a Devolución de IVA, Declaraciones, RUC, Claves y otras secciones del portal. Pre-configura automáticamente el formulario.
 - Entornos diferenciados por color: La interfaz cambia a verde agua cuando trabajas sobre emitidos y azul en recibidos, para que siempre sepas dónde estás.
 - Organización de archivos: Organiza las descargas en carpetas automáticamente (RUC/Año/Mes o Año/Mes/RUC), separando recibidos de emitidos, con 3 formatos de nombre de archivo y vista previa en tiempo real.
 - Progreso en tiempo real: Barra de progreso por documento (y por día en modo mes) con estimación de tiempo restante y badge en el ícono. Cancela en cualquier momento con "Detener Descarga".
@@ -44,7 +46,7 @@ Cómo usar:
 
 Devolución de IVA:
 1. Presiona "Devolución de IVA" y elige Personas con discapacidad o Adultos mayores
-2. Sigue los pasos del SRI hasta ver las facturas del período: el asistente se abre solo
-3. Presiona "Auto: todas las páginas" y revisa los datos antes de enviar
+2. Acepta las condiciones y elige tu cuenta bancaria; al llegar a la pantalla de año y período el asistente busca solo el primer período pendiente y abre sus facturas
+3. En la ventana de la extensión presiona "Auto: todas las páginas" y revisa los datos antes de enviar
 
 Nota: Esta extensión NO está afiliada al SRI. Es una herramienta independiente que interactúa con el portal público. El asistente de devolución de IVA es una ayuda para llenar el formulario: el contribuyente es responsable de revisar la información antes de enviarla.

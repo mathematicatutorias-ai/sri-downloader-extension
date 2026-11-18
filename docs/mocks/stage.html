@@ -64,6 +64,8 @@
   const placeholder = `<div class="placeholder">${anchos.map(a => `<div class="barra" style="width:${a}%"></div>`).join('')}</div>`;
 
   if (scene === 'iva') {
+    // Pagina de devolucion simulada con iva.js REAL rellenando las facturas
+    // (sin velo: se ve el resultado) + el popup con la vista del asistente
     set('tabTitulo', 'SRI - Devolución de IVA');
     set('url', 'srienlinea.sri.gob.ec/devolucionTerceraEdad-internet');
     page.remove();
@@ -81,14 +83,15 @@
     set('tabTitulo', cfg[0]);
     set('url', cfg[1]);
     page.innerHTML = `${portal}<div class="contenido">${cfg[2]}</div><div class="velo"></div>`;
-    const popup = document.createElement('iframe');
-    popup.id = 'popup';
-    popup.src = `popup_mock.html?scene=${scene}`;
-    document.body.appendChild(popup);
-    window.addEventListener('message', (e) => {
-      if (e.data && e.data.popupAlto) popup.style.height = Math.min(e.data.popupAlto, 690) + 'px';
-    });
   }
+
+  const popup = document.createElement('iframe');
+  popup.id = 'popup';
+  popup.src = `popup_mock.html?scene=${scene}`;
+  document.body.appendChild(popup);
+  window.addEventListener('message', (e) => {
+    if (e.data && e.data.popupAlto) popup.style.height = Math.min(e.data.popupAlto, 690) + 'px';
+  });
 </script>
 </body>
 </html>

@@ -1,18 +1,28 @@
 /**
  * Descargador de Comprobantes SRI - Asistente de devolucion de IVA
- * (personas con discapacidad). Portado de autofill_devolucioniva.
+ * (adultos mayores / personas con discapacidad). Portado de autofill_devolucioniva.
  *
- * Content script que inyecta un panel flotante en la pagina del SRI y, por
- * cada factura de la tabla de devolucion: marca el checkbox, rellena el
+ * Content script SIN interfaz propia: la interfaz vive en el popup de la
+ * extension (seccion "Asistente devolucion IVA"), que lo controla por mensajes
+ * y consulta su estado (ivaEstado). Aqui queda el trabajo sobre la pagina:
+ * por cada factura de la tabla de devolucion marca el checkbox, rellena el
  * "IVA solicitado" con el IVA completo y asigna el tipo de gasto segun el
  * nombre comercial del emisor (categorias personalizadas primero, luego las
  * base de iva-categorias.js). El modo automatico recorre todas las paginas
  * y, si todas las facturas quedaron con tipo de gasto, pulsa "Procesar
  * facturas seleccionadas".
  *
- * El panel se abre solo cuando aparece la tabla de facturas en la pagina, o
- * desde el popup (mensaje 'ivaAbrirPanel'). Depende de config.js (SRI_CONFIG.IVA)
- * e iva-categorias.js (IVA_CATEGORIAS_BASE), cargados antes en el manifest.
+ * Ademas aprende: cuando el usuario elige a mano el tipo de gasto de una
+ * factura cuyo proveedor no tiene categoria, la guarda como categoria
+ * personalizada (ver revisarSelecciones).
+ *
+ * Y busca los periodos pendientes: al llegar a la pantalla de anio/periodo
+ * consulta periodo por periodo hasta dar con uno que todavia no se ha
+ * procesado (ver buscarPeriodosPendientes).
+ *
+ * El proceso corre en la pagina y no depende de que el popup siga abierto.
+ * Depende de config.js (SRI_CONFIG.IVA) e iva-categorias.js
+ * (IVA_CATEGORIAS_BASE), cargados antes en el manifest.
  */
 
 if (window.SRI_IVA_LOADED) {
@@ -22,83 +32,74 @@ if (window.SRI_IVA_LOADED) {
 
 (() => {
   const CFG = SRI_CONFIG.IVA;
-  const PANEL_ID = 'sri-iva-panel';
+  const NOTIF_ID = 'sri-iva-notificacion';
   const STORAGE_KEY = 'ivaCategoriasCustom';
   const STORAGE_AUTO = 'ivaAutoProcesar';
+  const STORAGE_BUSCAR = 'ivaAutoBuscar';
+  /** Clave de sessionStorage con el avance de la busqueda de periodos */
+  const SESSION_BUSQUEDA = 'sriIvaBusqueda';
+  /** Una busqueda guardada mas vieja que esto se descarta (ms) */
+  const VIGENCIA_BUSQUEDA = 60 * 60 * 1000;
+  /** Lineas de log que se conservan para el popup */
+  const MAX_LOG = 500;
 
   /** @type {Object<string, string>} nombre comercial (MAYUSCULAS) -> tipo de gasto */
   let categoriasCustom = {};
   /**
    * Si el modo automatico pulsa "Procesar facturas seleccionadas" al terminar
    * (envio al SRI). true por defecto; el usuario puede desactivarlo en el
-   * panel para revisar antes de enviar.
+   * popup para revisar antes de enviar.
    */
   let autoProcesar = true;
+  /**
+   * Si al llegar a la pantalla de anio/periodo se buscan solos los periodos
+   * pendientes. true por defecto; se desactiva desde el popup.
+   */
+  let autoBuscar = true;
+  /** Las preferencias ya se leyeron de storage (no auto-buscar antes de saberlo) */
+  let preferenciasCargadas = false;
+  /** Rellenando facturas (pagina o modo auto) */
   let autoRunning = false;
+  /** Buscando periodos pendientes o abriendo uno */
+  let buscando = false;
   let stopRequested = false;
-  /** El usuario cerro el panel en esta pagina: no reabrirlo solo */
-  let cerradoPorUsuario = false;
+
+  // Estado que consulta el popup (ivaEstado). El log se entrega de forma
+  // incremental: logGen identifica el log actual (cambia al limpiarlo o al
+  // recargar la pagina) y logBase cuenta las lineas ya descartadas por MAX_LOG
+  /** @type {Array<{msg: string, cls: string}>} */
+  let logLineas = [];
+  let logGen = Date.now();
+  let logBase = 0;
+  /** @type {{msg: string, tipo: string}|null} Estado puesto por una accion; null = estado base */
+  let statusAccion = null;
 
   // =====================================================
   // Storage
   // =====================================================
 
-  function cargarCategoriasCustom() {
-    chrome.storage.local.get([STORAGE_KEY, STORAGE_AUTO], (data) => {
+  function cargarPreferencias() {
+    chrome.storage.local.get([STORAGE_KEY, STORAGE_AUTO, STORAGE_BUSCAR], (data) => {
       categoriasCustom = data?.[STORAGE_KEY] || {};
       autoProcesar = data?.[STORAGE_AUTO] !== false;
-      const chk = $('sri-iva-auto-procesar');
-      if (chk) chk.checked = autoProcesar;
-      renderListaCustom();
+      autoBuscar = data?.[STORAGE_BUSCAR] !== false;
+      preferenciasCargadas = true;
+      revisarTabla();
     });
-  }
-
-  /**
-   * Descarga las categorias personalizadas como JSON (respaldo o para
-   * pasarlas a otro equipo).
-   */
-  function exportarCategorias() {
-    const blob = new Blob([JSON.stringify(categoriasCustom, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'categorias_devolucion_iva.json';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  /**
-   * Importa categorias desde un JSON {"NOMBRE COMERCIAL": "4", ...} (el
-   * formato que exporta este panel y el de categorias.json de la extension
-   * anterior). Se SUMAN a las existentes; las entradas invalidas se ignoran.
-   * @param {File} archivo
-   */
-  async function importarCategorias(archivo) {
-    try {
-      const datos = JSON.parse(await archivo.text());
-      if (!datos || typeof datos !== 'object' || Array.isArray(datos)) throw new Error('formato no valido');
-      let agregadas = 0;
-      for (const [nombre, valor] of Object.entries(datos)) {
-        const clave = String(nombre).trim().toUpperCase();
-        const tipo = String(valor);
-        if (clave && CFG.TIPOS_GASTO[tipo]) {
-          categoriasCustom[clave] = tipo;
-          agregadas++;
-        }
-      }
-      guardarCategoriasCustom();
-      renderListaCustom();
-      log(`Categorias importadas: ${agregadas}`, agregadas > 0 ? 'ok' : 'warn');
-    } catch (e) {
-      log(`No se pudo importar el archivo: ${e.message}`, 'warn');
-    }
   }
 
   function guardarCategoriasCustom() {
     chrome.storage.local.set({ [STORAGE_KEY]: categoriasCustom });
   }
+
+  // El popup edita las categorias y las casillas (envio y busqueda
+  // automaticos) directamente en storage: mantener la copia en memoria al dia
+  chrome.storage.onChanged?.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (changes[STORAGE_KEY]) categoriasCustom = changes[STORAGE_KEY].newValue || {};
+    if (changes[STORAGE_AUTO]) autoProcesar = changes[STORAGE_AUTO].newValue !== false;
+    if (changes[STORAGE_BUSCAR]) autoBuscar = changes[STORAGE_BUSCAR].newValue !== false;
+  });
 
   // =====================================================
   // Utilidades
@@ -106,18 +107,20 @@ if (window.SRI_IVA_LOADED) {
 
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-  function $(id) {
-    return document.getElementById(id);
+  function log(msg, cls = 'info') {
+    logLineas.push({ msg, cls });
+    if (logLineas.length > MAX_LOG) {
+      const sobran = logLineas.length - MAX_LOG;
+      logLineas.splice(0, sobran);
+      logBase += sobran;
+    }
   }
 
-  function log(msg, cls = 'info') {
-    const logDiv = $('sri-iva-log');
-    if (!logDiv) return;
-    const line = document.createElement('div');
-    line.className = cls;
-    line.textContent = msg;
-    logDiv.appendChild(line);
-    logDiv.scrollTop = logDiv.scrollHeight;
+  function limpiarLog() {
+    logLineas = [];
+    logBase = 0;
+    logGen++;
+    statusAccion = null;
   }
 
   function getNombreCategoria(valor) {
@@ -177,6 +180,22 @@ if (window.SRI_IVA_LOADED) {
     return tbody ? Array.from(tbody.querySelectorAll('tr[data-ri]')) : [];
   }
 
+  /** Texto de una celda de la tabla (el SRI lo pone dentro de un label) */
+  function textoCelda(celda) {
+    return (celda?.querySelector('label')?.textContent ?? celda?.textContent ?? '').trim();
+  }
+
+  function getNombreComercial(fila) {
+    return textoCelda(fila.querySelectorAll('td')[CFG.COL_NOMBRE_COMERCIAL]);
+  }
+
+  /** Select del tipo de gasto de la fila: el oculto de PrimeFaces o uno nativo */
+  function getSelectTipoGasto(fila) {
+    return fila.querySelector(CFG.SELECT_TIPO_GASTO) ||
+           fila.querySelector("select[id*='cmbTipoGasto']") ||
+           fila.querySelector('select');
+  }
+
   /**
    * Busca un elemento del paginador de la tabla de facturas (la pagina puede
    * tener otros paginadores); si no lo encuentra en la tabla, en el documento.
@@ -230,6 +249,9 @@ if (window.SRI_IVA_LOADED) {
     if (input.checked) return true;
     chkBox.click();
     await sleep(800);
+    // Al marcar la fila el SRI habilita por AJAX su "IVA solicitado" y su
+    // tipo de gasto (verificado en vivo): esperar si el servidor va lento
+    await esperarA(() => !fila.querySelector('.ui-selectonemenu.ui-state-disabled'), 3000);
     return true;
   }
 
@@ -247,9 +269,39 @@ if (window.SRI_IVA_LOADED) {
   }
 
   /**
-   * Selecciona el tipo de gasto en el SelectOneMenu de PrimeFaces: abre el
-   * panel con el trigger y hace click en el item. Fallback: setea el select
-   * oculto + el label a mano. Ultimo recurso: un <select> nativo de la fila.
+   * Elige una opcion en un SelectOneMenu de PrimeFaces como lo haria el
+   * usuario: abre el panel con el trigger y hace click en el item (asi
+   * PrimeFaces dispara su propio "change" y los AJAX asociados). Verificado
+   * en vivo con los menus de anio y periodo.
+   * @param {HTMLSelectElement} select - select oculto (id terminado en _input)
+   * @param {string} valor - value de la opcion
+   * @returns {Promise<boolean>} false si no se encontro el menu o la opcion
+   */
+  async function elegirEnMenu(select, valor) {
+    const baseId = select.id.replace(/_input$/, '');
+    const menu = document.getElementById(baseId);
+    if (!menu) return false;
+    const idx = Array.from(select.options).findIndex(o => o.value === valor);
+    if (idx < 0) return false;
+    (menu.querySelector('.ui-selectonemenu-trigger') || menu).click();
+    // PrimeFaces crea los <li> del panel recien al abrirlo por primera vez
+    // (tras cada re-render AJAX el panel vuelve a estar vacio): esperar a
+    // que esten todos antes de elegir
+    let items = [];
+    const limite = Date.now() + 2000;
+    do {
+      await sleep(250);
+      items = document.getElementById(baseId + '_panel')?.querySelectorAll('li.ui-selectonemenu-item') || [];
+    } while (items.length <= idx && Date.now() < limite);
+    if (items.length <= idx) return false;
+    items[idx].click();
+    return true;
+  }
+
+  /**
+   * Selecciona el tipo de gasto en el SelectOneMenu de PrimeFaces (ver
+   * elegirEnMenu). Fallback: setea el select oculto + el label a mano.
+   * Ultimo recurso: un <select> nativo de la fila.
    */
   async function seleccionarTipoGasto(fila, valor) {
     const selectInput = fila.querySelector(CFG.SELECT_TIPO_GASTO);
@@ -257,18 +309,9 @@ if (window.SRI_IVA_LOADED) {
       const baseId = selectInput.id.replace(/_input$/, '');
       const menu = document.getElementById(baseId);
       if (menu) {
-        const trigger = menu.querySelector('.ui-selectonemenu-trigger') || menu;
-        trigger.click();
-        await sleep(500);
-        const panel = document.getElementById(baseId + '_panel');
-        if (panel) {
-          const items = panel.querySelectorAll('li.ui-selectonemenu-item');
-          const idx = Array.from(selectInput.options).findIndex(o => o.value === valor);
-          if (idx >= 0 && idx < items.length) {
-            items[idx].click();
-            await sleep(400);
-            return true;
-          }
+        if (await elegirEnMenu(selectInput, valor)) {
+          await sleep(400);
+          return true;
         }
         selectInput.value = valor;
         const labelEl = document.getElementById(baseId + '_label') ||
@@ -296,7 +339,7 @@ if (window.SRI_IVA_LOADED) {
   /** @returns {Promise<boolean>} true si la fila quedo completa */
   async function procesarFila(fila, index) {
     const celdas = fila.querySelectorAll('td');
-    const nombreComercial = celdas[CFG.COL_NOMBRE_COMERCIAL]?.querySelector('label')?.textContent?.trim() || 'Desconocido';
+    const nombreComercial = getNombreComercial(fila) || 'Desconocido';
     const montoIva = celdas[CFG.COL_MONTO_IVA]?.querySelector('label')?.textContent?.trim() || '0';
     log(`Fila ${index + 1}: ${nombreComercial.substring(0, 30)}...`);
 
@@ -312,7 +355,7 @@ if (window.SRI_IVA_LOADED) {
 
     const categoria = detectarCategoria(nombreComercial);
     if (!categoria) {
-      log(`  SIN CATEGORIA: "${nombreComercial}" - seleccione manualmente`, 'warn');
+      log(`  SIN CATEGORIA: "${nombreComercial}" - seleccione manualmente (se guardara para la proxima vez)`, 'warn');
       return false;
     }
     if (!await seleccionarTipoGasto(fila, categoria)) {
@@ -367,10 +410,55 @@ if (window.SRI_IVA_LOADED) {
     return true;
   }
 
-  async function procesarTodasLasPaginas() {
+  /**
+   * Cierra un proceso (pagina o modo auto): deja registrados los tipos de
+   * gasto que puso el asistente ANTES de bajar autoRunning, para que
+   * revisarSelecciones no los tome despues por elecciones del usuario.
+   */
+  function terminarProceso() {
+    revisarSelecciones();
+    autoRunning = false;
+    stopRequested = false;
+  }
+
+  /** Rellena solo la pagina visible de la tabla (no envia nada al SRI) */
+  async function rellenarPagina() {
+    if (autoRunning || buscando) return;
     autoRunning = true;
     stopRequested = false;
-    actualizarBotones();
+    setStatus('Procesando pagina...', 'working');
+    try {
+      const r = await procesarPaginaActual();
+      if (stopRequested) {
+        setStatus('Detenido por el usuario', 'warn');
+      } else if (r.incompletas > 0) {
+        setStatus(`${r.incompletas} factura(s) sin categoria`, 'warn');
+        mostrarNotificacion(`${r.incompletas} factura(s) sin tipo de gasto. Complete manualmente.`, 'error');
+      } else {
+        setStatus('Pagina lista - Revise', 'done');
+      }
+    } catch (e) {
+      log(`Error inesperado: ${e.message}`, 'warn');
+      setStatus('Error inesperado', 'warn');
+    } finally {
+      terminarProceso();
+    }
+  }
+
+  function siguientePagina() {
+    if (autoRunning || buscando) return;
+    if (hayPaginaSiguiente()) {
+      getPaginador('.ui-paginator-next').click();
+      log('Avanzando a siguiente pagina...', 'info');
+    } else {
+      log('No hay mas paginas', 'warn');
+    }
+  }
+
+  async function procesarTodasLasPaginas() {
+    if (autoRunning || buscando) return;
+    autoRunning = true;
+    stopRequested = false;
     let pagina = 1;
     let totalFacturas = 0;
     let totalIncompletas = 0;
@@ -382,6 +470,7 @@ if (window.SRI_IVA_LOADED) {
 
       while (!stopRequested) {
         log(`--- Pagina ${pagina} ---`, 'info');
+        setStatus(`Procesando pagina ${pagina}...`, 'working');
         const r = await procesarPaginaActual();
         totalFacturas += r.procesadas;
         totalIncompletas += r.incompletas;
@@ -415,268 +504,564 @@ if (window.SRI_IVA_LOADED) {
       log(`Error inesperado: ${e.message}`, 'warn');
       setStatus('Error inesperado', 'warn');
     } finally {
-      autoRunning = false;
-      stopRequested = false;
-      actualizarBotones();
+      terminarProceso();
     }
   }
 
   // =====================================================
-  // UI
+  // Aprendizaje de categorias (eleccion manual del usuario)
   // =====================================================
 
-  function mostrarNotificacion(mensaje, tipo = 'ok') {
-    $('sri-iva-notificacion')?.remove();
+  /**
+   * Ultimo tipo de gasto visto por fila. La clave es estable aunque
+   * PrimeFaces re-renderice la fila (id JSF del select + nombre + IVA).
+   * @type {Map<string, string>}
+   */
+  const tiposVistos = new Map();
+
+  function claveFila(fila, select) {
+    const celdas = fila.querySelectorAll('td');
+    return [select.id || fila.dataset.ri, getNombreComercial(fila), textoCelda(celdas[CFG.COL_MONTO_IVA])].join('|');
+  }
+
+  /**
+   * Compara el tipo de gasto de cada fila con el ultimo visto. Un cambio que
+   * no hizo el asistente (autoRunning) es una eleccion manual del usuario y
+   * se pasa a aprenderCategoria.
+   *
+   * Se detecta comparando valores y no con el evento "change" porque
+   * PrimeFaces lo dispara con jQuery (.trigger), que no llega a los listeners
+   * nativos de un content script. La primera vez que se ve una fila solo se
+   * anota su valor (puede venir ya rellenada por el SRI).
+   */
+  function revisarSelecciones() {
+    for (const fila of getFilas()) {
+      const select = getSelectTipoGasto(fila);
+      if (!select) continue;
+      const clave = claveFila(fila, select);
+      const actual = select.value;
+      const previo = tiposVistos.get(clave);
+      if (previo === actual) continue;
+      tiposVistos.set(clave, actual);
+      if (previo === undefined || autoRunning) continue;
+      aprenderCategoria(getNombreComercial(fila), actual);
+    }
+  }
+
+  /**
+   * Guarda como categoria personalizada el tipo de gasto que el usuario
+   * eligio a mano, para que la proxima vez ese proveedor se rellene solo.
+   * - Proveedor sin categoria: se registra con su nombre comercial completo.
+   * - Proveedor que ya se registro con ese mismo nombre: se actualiza (el
+   *   usuario corrigio su eleccion).
+   * - Proveedor cubierto por otra categoria (base o personalizada parcial):
+   *   no se toca; una eleccion puntual distinta no cambia la regla general.
+   */
+  function aprenderCategoria(nombreComercial, valor) {
+    if (!CFG.TIPOS_GASTO[valor]) return;
+    const clave = nombreComercial.trim().toUpperCase();
+    if (!clave) return;
+    const existente = categoriasCustom[clave];
+    if (existente === valor) return;
+    if (existente === undefined && detectarCategoria(nombreComercial)) return;
+
+    categoriasCustom[clave] = valor;
+    guardarCategoriasCustom();
+    const accion = existente === undefined ? 'guardada' : 'actualizada';
+    log(`Categoria ${accion}: ${clave} -> ${getNombreCategoria(valor)}`, 'ok');
+    mostrarNotificacion(`Categoria ${accion}: ${clave} → ${getNombreCategoria(valor)}`, 'mini');
+  }
+
+  // =====================================================
+  // Busqueda de periodos pendientes
+  // =====================================================
+  // Pantalla "Facturas electronicas" (anio + periodo + Buscar). Verificado en
+  // vivo (2026-11, discapacidad):
+  // - Elegir el anio recarga el panel por AJAX (selects nuevos) y llena los
+  //   periodos de ese anio.
+  // - Buscar (AJAX, ~0.3 s) muestra la tabla de facturas si el periodo esta
+  //   pendiente, o la pantalla "No se puede continuar con la carga de
+  //   informacion" con el motivo ("Ya esta en tramite un proceso de devolucion
+  //   de IVA por el periodo solicitado..." / "Para el periodo X no se
+  //   encontraron facturas...") y el boton "Volver a intentar".
+  // - "Volver a intentar" RECARGA la pagina (vuelve a anio/periodo conservando
+  //   la seleccion) y este script se reinicia: por eso el avance vive en
+  //   sessionStorage y la busqueda se reanuda sola al cargar.
+
+  /**
+   * Avance de la busqueda (persistido en sessionStorage, por pestana).
+   * @type {{usuario: string, ts: number, activa: boolean, detenida: boolean,
+   *   completa: boolean, todos: boolean, hayMasAnios: boolean,
+   *   anios: string[], aniosCompletos: string[], abierto: string|null,
+   *   resultados: Object<string, {anio: string, periodo: string, nombre: string,
+   *     estado: 'tramite'|'sinFacturas'|'pendiente'|'otro', msg: string}>}|null}
+   */
+  let busqueda = leerBusqueda();
+
+  function getUsuario() {
+    return document.querySelector(SRI_CONFIG.SELECTORES.RUC_USUARIO)?.textContent.trim() || '';
+  }
+
+  /** Busqueda guardada, si es de este usuario y reciente; si no, null */
+  function leerBusqueda() {
+    try {
+      const b = JSON.parse(sessionStorage.getItem(SESSION_BUSQUEDA));
+      if (b && b.usuario === getUsuario() && Date.now() - b.ts < VIGENCIA_BUSQUEDA) return b;
+    } catch (e) { /* sin acceso a sessionStorage o JSON invalido */ }
+    return null;
+  }
+
+  function guardarBusqueda() {
+    try {
+      busqueda.ts = Date.now();
+      sessionStorage.setItem(SESSION_BUSQUEDA, JSON.stringify(busqueda));
+    } catch (e) { /* sin sessionStorage la busqueda no sobrevive a la recarga */ }
+  }
+
+  function nuevaBusqueda(todos) {
+    busqueda = {
+      usuario: getUsuario(), ts: Date.now(), activa: true, detenida: false, completa: false,
+      todos, hayMasAnios: false, anios: [], aniosCompletos: [], abierto: null, resultados: {}
+    };
+    guardarBusqueda();
+  }
+
+  function visible(el) {
+    return !!el && !!(el.offsetWidth || el.offsetHeight);
+  }
+
+  function botonPorTexto(raiz, patron) {
+    return Array.from((raiz || document).querySelectorAll('button'))
+      .find(b => visible(b) && patron.test(b.textContent)) || null;
+  }
+
+  /**
+   * Selectores de anio/periodo y boton Buscar. OJO: siguen en pantalla
+   * cuando debajo esta la tabla de facturas de un periodo (misma pantalla);
+   * para "solo periodos, sin tabla" usar enSoloPeriodos.
+   * @returns {{anio: HTMLSelectElement, periodo: HTMLSelectElement, buscar: HTMLElement}|null}
+   */
+  function getPantallaPeriodos() {
+    const anio = document.querySelector(CFG.SELECT_ANIO);
+    const periodo = document.querySelector(CFG.SELECT_PERIODO);
+    if (!anio || !periodo) return null;
+    const buscar = document.querySelector(CFG.BTN_BUSCAR) || botonPorTexto(anio.closest('form'), /^\s*buscar\s*$/i);
+    return visible(buscar) ? { anio, periodo, buscar } : null;
+  }
+
+  /** Pantalla de anio/periodo SIN tabla de facturas (aun no se abrio un periodo) */
+  function enSoloPeriodos() {
+    return !getTbody() && !!getPantallaPeriodos();
+  }
+
+  /** Boton "Volver a intentar" de la pantalla de error del SRI, si esta a la vista */
+  function getBotonVolverError() {
+    const porId = document.querySelector(CFG.BTN_VOLVER_ERROR);
+    return visible(porId) ? porId : botonPorTexto(document, /volver a intentar/i);
+  }
+
+  function getMensajeSri() {
+    return Array.from(document.querySelectorAll('.ui-messages-error-summary, .ui-messages-error-detail, .ui-messages-warn-summary, .ui-messages-info-summary'))
+      .filter(visible).map(e => e.textContent.trim()).filter(Boolean).join(' ');
+  }
+
+  /** Espera (sondeando) a que cond() devuelva algo; null si se agota el tiempo */
+  async function esperarA(cond, timeout) {
+    const limite = Date.now() + timeout;
+    for (;;) {
+      const r = cond();
+      if (r) return r;
+      if (Date.now() >= limite) return null;
+      await sleep(200);
+    }
+  }
+
+  /**
+   * Deja elegido el anio en la pantalla de periodos y espera a que el SRI
+   * recargue el panel con los periodos de ese anio.
+   * @returns {Promise<boolean>}
+   */
+  async function seleccionarAnio(anio) {
+    const pantalla = getPantallaPeriodos();
+    if (!pantalla) return false;
+    if (pantalla.anio.value === anio) return pantalla.periodo.options.length > 1;
+
+    // Esperar a que el AJAX REEMPLACE el select de periodos: PrimeFaces pone
+    // el anio en el select viejo al instante, antes de que llegue la respuesta
+    const viejo = pantalla.periodo;
+    if (!await elegirEnMenu(pantalla.anio, anio)) return false;
+    return !!await esperarA(() => {
+      const p = getPantallaPeriodos();
+      return p && p.periodo !== viejo && p.anio.value === anio && p.periodo.options.length > 1;
+    }, 8000);
+  }
+
+  /**
+   * Consulta un periodo (elige anio y periodo, pulsa Buscar) y clasifica la
+   * respuesta del SRI. Si el periodo esta pendiente la tabla de facturas
+   * queda en pantalla.
+   * @returns {Promise<{estado: 'tramite'|'sinFacturas'|'pendiente'|'otro'|'fallo', msg: string}>}
+   *   'otro' = pantalla de error con un motivo no reconocido; 'fallo' = no se
+   *   pudo consultar (no llega al SRI o no responde)
+   */
+  async function consultarPeriodo(anio, periodo) {
+    if (!await seleccionarAnio(anio)) return { estado: 'fallo', msg: `No se pudo elegir el anio ${anio}` };
+    let pantalla = getPantallaPeriodos();
+    if (pantalla.periodo.value !== periodo) {
+      if (!await elegirEnMenu(pantalla.periodo, periodo)) return { estado: 'fallo', msg: `No se pudo elegir el periodo ${periodo}` };
+      await sleep(600);
+    }
+    pantalla = getPantallaPeriodos();
+    if (!pantalla || pantalla.anio.value !== anio || pantalla.periodo.value !== periodo) {
+      return { estado: 'fallo', msg: 'La pantalla no quedo en el periodo pedido' };
+    }
+
+    // Si ya habia una tabla (de otro periodo) en pantalla, la respuesta es
+    // una tabla NUEVA: el AJAX reemplaza el tbody
+    const tbodyViejo = getTbody();
+    pantalla.buscar.click();
+    const respuesta = await esperarA(() => {
+      const tbody = getTbody();
+      if (tbody && tbody !== tbodyViejo) return { estado: 'pendiente', msg: '' };
+      if (getBotonVolverError()) return { estado: 'error', msg: getMensajeSri() };
+      // Mensaje sin salir de la pantalla de periodos (validacion del SRI)
+      const msg = getPantallaPeriodos() && getMensajeSri();
+      return msg ? { estado: 'fallo', msg } : null;
+    }, 15000);
+
+    if (!respuesta) return { estado: 'fallo', msg: 'El SRI no respondio a la consulta' };
+    if (respuesta.estado !== 'error') return respuesta;
+    const msg = normalizar(respuesta.msg);
+    if (msg.includes('EN TRAMITE')) return { estado: 'tramite', msg: respuesta.msg };
+    if (msg.includes('NO SE ENCONTRARON FACTURAS')) return { estado: 'sinFacturas', msg: respuesta.msg };
+    return { estado: 'otro', msg: respuesta.msg || 'El SRI no permitio continuar' };
+  }
+
+  /**
+   * Siguiente periodo sin consultar: empieza por el anio mas reciente y,
+   * dentro de cada anio, va de enero en adelante (las devoluciones se
+   * presentan en orden); luego sigue con el anio anterior. Los periodos de
+   * un anio solo se conocen al elegirlo, asi que puede cambiar el anio en
+   * pantalla. Sin `todos` se limita a los CFG.ANIOS_BUSQUEDA anios mas
+   * recientes.
+   * @returns {Promise<{anio: string, periodo: string, nombre: string}|null|false>}
+   *   null = no queda ninguno; false = no se pudo leer la pantalla
+   */
+  async function siguientePeriodo() {
+    const pantalla = getPantallaPeriodos();
+    if (!pantalla) return false;
+    const anios = Array.from(pantalla.anio.options).map(o => o.value).filter(Boolean)
+      .sort((a, b) => Number(b) - Number(a));
+    busqueda.anios = busqueda.todos ? anios : anios.slice(0, CFG.ANIOS_BUSQUEDA);
+    busqueda.hayMasAnios = busqueda.anios.length < anios.length;
+
+    for (const anio of busqueda.anios) {
+      if (busqueda.aniosCompletos.includes(anio)) continue;
+      if (!await seleccionarAnio(anio)) return false;
+      const libre = Array.from(getPantallaPeriodos().periodo.options)
+        .filter(o => o.value)
+        .sort((a, b) => Number(a.value) - Number(b.value))
+        .find(o => !busqueda.resultados[`${anio}-${o.value}`]);
+      if (libre) return { anio, periodo: libre.value, nombre: `${libre.textContent.trim()} ${anio}` };
+      busqueda.aniosCompletos.push(anio);
+      guardarBusqueda();
+    }
+    return null;
+  }
+
+  function contarResultados(estado) {
+    return Object.values(busqueda?.resultados || {}).filter(r => r.estado === estado).length;
+  }
+
+  /** Cierra la busqueda en curso (queda guardada para el popup) */
+  function terminarBusqueda(msg, tipo, cambios = {}) {
+    Object.assign(busqueda, { activa: false }, cambios);
+    guardarBusqueda();
+    setStatus(msg, tipo);
+    log(msg, tipo === 'done' ? 'done' : 'warn');
+    mostrarNotificacion(msg, 'mini', 7000);
+  }
+
+  /**
+   * Recorre los periodos (desde enero del anio mas reciente) hasta encontrar
+   * uno pendiente: ahi se detiene con la tabla de facturas en pantalla,
+   * lista para rellenar. Los que estan en tramite o sin facturas se anotan y
+   * se sigue con el siguiente.
+   *
+   * Requiere busqueda.activa; se llama al iniciarla y cada vez que la pagina
+   * vuelve a la pantalla de periodos (ver revisarPeriodos). Si el usuario
+   * regresa a esa pantalla tras un periodo pendiente, primero se vuelve a
+   * consultar ESE periodo una vez (si ya lo proceso pasa a "en tramite").
+   */
+  async function buscarPeriodosPendientes() {
+    if (buscando || autoRunning || !busqueda?.activa) return;
+    buscando = true;
+    stopRequested = false;
+    try {
+      for (;;) {
+        if (stopRequested || !busqueda.activa) {
+          terminarBusqueda('Busqueda de periodos detenida', 'warn', { detenida: true });
+          return;
+        }
+        // Las interrupciones quedan como "detenida": sin eso revisarPeriodos
+        // la reanudaria sola y reintentaria lo mismo sin fin
+        if (!await esperarA(getPantallaPeriodos, 10000)) {
+          terminarBusqueda('La busqueda de periodos se interrumpio: no esta la pantalla de anio y periodo', 'warn', { detenida: true });
+          return;
+        }
+
+        // Periodo pendiente que quedo abierto: comprobar (una sola vez) si ya
+        // se proceso. Si sigue pendiente su tabla vuelve a quedar en pantalla;
+        // la proxima vez se sigue de largo con los periodos anteriores
+        const abierto = busqueda.abierto && busqueda.resultados[busqueda.abierto];
+        busqueda.abierto = null;
+        const reverificar = !!abierto && !abierto.reverificado;
+        const sig = reverificar ? abierto : await siguientePeriodo();
+        if (sig === false) {
+          terminarBusqueda('La busqueda de periodos se interrumpio: no se pudo leer la pantalla', 'warn', { detenida: true });
+          return;
+        }
+        if (!sig) {
+          const pendientes = Object.values(busqueda.resultados).filter(r => r.estado === 'pendiente');
+          const alcance = busqueda.anios.join(', ');
+          terminarBusqueda(pendientes.length > 0
+            ? `Periodos pendientes (${alcance}): ${pendientes.map(r => r.nombre).join(', ')}`
+            : `No hay periodos pendientes en ${alcance} (${contarResultados('tramite')} en tramite, ${contarResultados('sinFacturas')} sin facturas)`,
+          'done', { completa: true });
+          return;
+        }
+
+        const progreso = `Buscando periodos pendientes: ${sig.nombre}...`;
+        setStatus(progreso, 'working');
+        mostrarNotificacion(`${progreso} (abra la extension para detener)`, 'mini', 0);
+
+        const r = await consultarPeriodo(sig.anio, sig.periodo);
+        if (r.estado === 'fallo') {
+          terminarBusqueda(`La busqueda de periodos se interrumpio en ${sig.nombre}: ${r.msg}`, 'warn', { detenida: true });
+          return;
+        }
+        const clave = `${sig.anio}-${sig.periodo}`;
+        busqueda.resultados[clave] = {
+          anio: sig.anio, periodo: sig.periodo, nombre: sig.nombre, estado: r.estado, msg: r.msg,
+          reverificado: reverificar || undefined
+        };
+        if (r.estado === 'pendiente') {
+          avisoTablaMostrado = true;
+          terminarBusqueda(`Periodo pendiente: ${sig.nombre}. Abra la extension para rellenar las facturas.`, 'done', { abierto: clave });
+          pedirPopup();
+          return;
+        }
+        // En tramite, sin facturas u otro motivo: guardar ANTES de volver
+        // (la pagina se recarga y este script se reinicia)
+        guardarBusqueda();
+        getBotonVolverError()?.click();
+        // Normalmente no se llega mas alla: tras la recarga, revisarPeriodos
+        // reanuda. Si el SRI volviera sin recargar, el bucle sigue aqui
+        await esperarA(() => !getBotonVolverError(), 10000);
+      }
+    } catch (e) {
+      terminarBusqueda(`Error inesperado en la busqueda de periodos: ${e.message}`, 'warn', { detenida: true });
+    } finally {
+      buscando = false;
+      stopRequested = false;
+    }
+  }
+
+  /**
+   * Inicia la busqueda desde el popup.
+   * @param {boolean} todos - false: busqueda nueva en los anios recientes;
+   *   true: sigue la actual incluyendo todos los anios que ofrece el SRI
+   */
+  function iniciarBusquedaPeriodos(todos) {
+    if (buscando || autoRunning) return;
+    if (!getPantallaPeriodos()) {
+      log('Para buscar periodos vaya a la pantalla de anio y periodo (Ingresar facturas electronicas)', 'warn');
+      return;
+    }
+    if (todos && busqueda) {
+      Object.assign(busqueda, { activa: true, detenida: false, completa: false, todos: true, abierto: null });
+      guardarBusqueda();
+    } else {
+      nuevaBusqueda(todos);
+    }
+    buscarPeriodosPendientes();
+  }
+
+  /** Abre desde el popup un periodo de la lista (deja su tabla en pantalla) */
+  async function abrirPeriodo(anio, periodo) {
+    if (buscando || autoRunning) return;
+    if (!getPantallaPeriodos()) {
+      log('Para abrir un periodo vaya a la pantalla de anio y periodo (Ingresar facturas electronicas)', 'warn');
+      return;
+    }
+    buscando = true;
+    try {
+      const clave = `${anio}-${periodo}`;
+      const nombre = busqueda?.resultados[clave]?.nombre || `${periodo}/${anio}`;
+      setStatus(`Abriendo ${nombre}...`, 'working');
+      const r = await consultarPeriodo(String(anio), String(periodo));
+      if (r.estado === 'pendiente') {
+        setStatus(`Facturas de ${nombre} en pantalla`, 'done');
+        if (busqueda) busqueda.abierto = clave;
+      } else {
+        setStatus(`${nombre}: ${r.msg || 'no se pudo abrir'}`, 'warn');
+        log(`${nombre}: ${r.msg || 'no se pudo abrir'}`, 'warn');
+      }
+      if (busqueda?.resultados[clave] && r.estado !== 'fallo') {
+        Object.assign(busqueda.resultados[clave], { estado: r.estado, msg: r.msg });
+      }
+      if (busqueda) guardarBusqueda();
+    } catch (e) {
+      setStatus('Error inesperado', 'warn');
+      log(`Error inesperado: ${e.message}`, 'warn');
+    } finally {
+      buscando = false;
+    }
+  }
+
+  /**
+   * Al aparecer la pantalla de anio/periodo: reanuda la busqueda en curso
+   * (venimos de la recarga de "Volver a intentar") o, con la busqueda
+   * automatica activada, la inicia o la continua. No hace nada si el usuario
+   * la detuvo o si ya termino: desde ahi manda el popup.
+   */
+  function revisarPeriodos() {
+    // Con la tabla de un periodo en pantalla no se busca solo: cambiar de
+    // periodo descartaria lo que el usuario lleva seleccionado
+    if (buscando || autoRunning || !enSoloPeriodos()) return;
+    if (busqueda?.activa) {
+      buscarPeriodosPendientes();
+      return;
+    }
+    if (!preferenciasCargadas) return;
+    const terminada = !!busqueda && (busqueda.detenida || busqueda.completa);
+    // El popup se abre solo al llegar a la pantalla (una vez por carga de
+    // pagina), listo para buscar o ya buscando
+    if (!terminada && !popupPedido) {
+      popupPedido = true;
+      pedirPopup();
+    }
+    if (!autoBuscar || terminada) return;
+    if (!busqueda) {
+      nuevaBusqueda(false);
+    } else {
+      busqueda.activa = true;
+      guardarBusqueda();
+    }
+    buscarPeriodosPendientes();
+  }
+
+  let popupPedido = false;
+
+  /**
+   * Pide al background que abra el popup de la extension sobre esta pestana
+   * (chrome.action.openPopup, Chrome 127+). Si no se puede (navegador
+   * antiguo, ventana sin foco, popup ya abierto) no pasa nada: los avisos
+   * de la pagina indican que hay que abrir la extension.
+   */
+  function pedirPopup() {
+    try {
+      chrome.runtime.sendMessage?.({ action: 'ivaAbrirPopup' }, () => void chrome.runtime.lastError);
+    } catch (e) { /* extension recargada: el script quedo huerfano */ }
+  }
+
+  // Respaldo de la revision por mutaciones del DOM: tras una interaccion
+  // real del usuario (click en el item del menu, teclado, select nativo)
+  let revisionSeleccion = null;
+  function programarRevisionSelecciones(e) {
+    if (!e.isTrusted || revisionSeleccion) return;
+    revisionSeleccion = setTimeout(() => {
+      revisionSeleccion = null;
+      revisarSelecciones();
+    }, 400);
+  }
+  for (const tipo of ['click', 'keyup', 'change']) {
+    document.addEventListener(tipo, programarRevisionSelecciones, true);
+  }
+
+  // =====================================================
+  // Avisos en la pagina y estado para el popup
+  // =====================================================
+
+  /**
+   * Aviso flotante en la pagina (lo unico que el asistente dibuja en ella).
+   * @param {string} mensaje
+   * @param {'ok'|'error'|'mini'} tipo - ok/error: centrado, para el resultado
+   *   de un proceso; mini: discreto, abajo (categoria guardada, sugerencias,
+   *   avance de la busqueda de periodos)
+   * @param {number} [duracion] - ms a la vista; 0 = hasta el siguiente aviso
+   */
+  function mostrarNotificacion(mensaje, tipo = 'ok', duracion = tipo === 'mini' ? 4000 : 5000) {
+    document.getElementById(NOTIF_ID)?.remove();
     const notif = document.createElement('div');
-    notif.id = 'sri-iva-notificacion';
+    notif.id = NOTIF_ID;
     notif.className = `sri-iva-notif-${tipo}`;
     notif.textContent = mensaje;
     document.body.appendChild(notif);
-    setTimeout(() => notif.remove(), 5000);
+    if (duracion > 0) setTimeout(() => notif.remove(), duracion);
   }
 
-  /** Estado puesto por una accion (no se pisa con el estado base) */
+  /** Estado puesto por una accion (tiene prioridad sobre el estado base) */
   function setStatus(msg, tipo) {
-    const status = $('sri-iva-status');
-    if (!status) return;
-    status.textContent = msg;
-    status.className = `sri-iva-status sri-iva-status-${tipo}`;
-    delete status.dataset.base;
+    statusAccion = { msg, tipo };
   }
 
-  /** Estado base segun haya o no tabla; solo si no hay un estado de accion */
-  function setStatusBase(forzar = false) {
-    const status = $('sri-iva-status');
-    if (!status || (!forzar && status.dataset.base !== '1')) return;
-    const hay = !!getTbody();
-    status.textContent = hay ? 'Listo' : 'Consulte las facturas del periodo para comenzar';
-    status.className = `sri-iva-status sri-iva-status-${hay ? 'done' : 'warn'}`;
-    status.dataset.base = '1';
-  }
-
-  /** Visibilidad/habilitacion de botones segun modo auto y presencia de tabla */
-  function actualizarBotones() {
-    const panel = $(PANEL_ID);
-    if (!panel) return;
+  /**
+   * Estado completo para el popup. El log va desde la linea que el popup ya
+   * tiene (request.logDesde) si sigue siendo el mismo log (request.logGen).
+   */
+  function estadoParaPopup(request) {
     const hayTabla = !!getTbody();
-    for (const id of ['sri-iva-btn-fill', 'sri-iva-btn-next', 'sri-iva-btn-auto']) {
-      const btn = $(id);
-      btn.hidden = autoRunning;
-      btn.disabled = !hayTabla;
-    }
-    $('sri-iva-btn-stop').hidden = !autoRunning;
-    $('sri-iva-btn-clear').disabled = autoRunning;
-    setStatusBase();
-  }
-
-  function renderListaCustom() {
-    const lista = $('sri-iva-custom-list');
-    if (!lista) return;
-    lista.replaceChildren();
-    const entries = Object.entries(categoriasCustom);
-    if (entries.length === 0) {
-      const vacio = document.createElement('div');
-      vacio.className = 'sri-iva-empty';
-      vacio.textContent = 'No hay categorias personalizadas';
-      lista.appendChild(vacio);
-      return;
-    }
-    for (const [nombre, cat] of entries) {
-      const item = document.createElement('div');
-      item.className = 'sri-iva-custom-item';
-      const texto = document.createElement('span');
-      texto.textContent = `${nombre} `;
-      const small = document.createElement('small');
-      small.textContent = `(${getNombreCategoria(cat)})`;
-      texto.appendChild(small);
-      const del = document.createElement('button');
-      del.type = 'button';
-      del.className = 'sri-iva-custom-del';
-      del.textContent = 'X';
-      del.title = 'Eliminar';
-      del.addEventListener('click', () => {
-        delete categoriasCustom[nombre];
-        guardarCategoriasCustom();
-        renderListaCustom();
-      });
-      item.append(texto, del);
-      lista.appendChild(item);
-    }
-  }
-
-  /** Crea un elemento con atributos y texto (construccion DOM segura) */
-  function el(tag, attrs = {}, texto) {
-    const e = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
-    if (texto !== undefined) e.textContent = texto;
-    return e;
-  }
-
-  function crearPanel() {
-    if ($(PANEL_ID)) return;
-
-    const panel = el('div', { id: PANEL_ID });
-
-    const header = el('div', { class: 'sri-iva-header' });
-    const btnMin = el('button', { type: 'button', id: 'sri-iva-minimize', title: 'Minimizar' }, '_');
-    const btnClose = el('button', { type: 'button', id: 'sri-iva-close', title: 'Cerrar' }, '×');
-    header.append(el('h3', {}, 'Asistente Devolucion IVA'), btnMin, btnClose);
-
-    const cuerpo = el('div', { class: 'sri-iva-body' });
-    const status = el('div', { id: 'sri-iva-status', class: 'sri-iva-status' });
-    status.dataset.base = '1';
-    const btnFill = el('button', { type: 'button', id: 'sri-iva-btn-fill' }, 'Rellenar esta pagina');
-    const btnNext = el('button', { type: 'button', id: 'sri-iva-btn-next' }, 'Siguiente pagina');
-    const btnAuto = el('button', { type: 'button', id: 'sri-iva-btn-auto' }, 'Auto: todas las paginas');
-    const btnStop = el('button', { type: 'button', id: 'sri-iva-btn-stop' }, 'Detener');
-    const btnClear = el('button', { type: 'button', id: 'sri-iva-btn-clear' }, 'Limpiar log');
-    const logDiv = el('div', { id: 'sri-iva-log' });
-
-    // Categorias personalizadas
-    const custom = el('div', { id: 'sri-iva-custom-section' });
-    const btnToggleCustom = el('button', { type: 'button', id: 'sri-iva-toggle-custom' }, 'Categorias personalizadas');
-    const customBody = el('div', { id: 'sri-iva-custom-body' });
-    customBody.hidden = true;
-    const addRow = el('div', { class: 'sri-iva-add-row' });
-    const inputNombre = el('input', { id: 'sri-iva-add-nombre', type: 'text', placeholder: 'Nombre comercial' });
-    const selectCat = el('select', { id: 'sri-iva-add-cat' });
-    for (const [valor, nombre] of Object.entries(CFG.TIPOS_GASTO)) {
-      const opt = el('option', { value: valor }, nombre);
-      if (valor === '4') opt.selected = true;
-      selectCat.appendChild(opt);
-    }
-    const btnAdd = el('button', { type: 'button', id: 'sri-iva-add-btn', title: 'Agregar' }, '+');
-    addRow.append(inputNombre, selectCat, btnAdd);
-    // Respaldo de las categorias personalizadas
-    const ioRow = el('div', { class: 'sri-iva-io-row' });
-    const btnExport = el('button', { type: 'button', class: 'sri-iva-io-btn', title: 'Guardar las categorias personalizadas en un archivo' }, 'Exportar');
-    const btnImport = el('button', { type: 'button', class: 'sri-iva-io-btn', title: 'Agregar categorias desde un archivo JSON' }, 'Importar');
-    const inputArchivo = el('input', { type: 'file', accept: '.json,application/json' });
-    inputArchivo.hidden = true;
-    ioRow.append(btnExport, btnImport, inputArchivo);
-    customBody.append(addRow, el('div', { id: 'sri-iva-custom-list' }), ioRow);
-    custom.append(btnToggleCustom, customBody);
-
-    // Envio automatico al terminar el modo auto (activado por defecto)
-    const autoLabel = el('label', { class: 'sri-iva-auto-label' });
-    const chkAuto = el('input', { type: 'checkbox', id: 'sri-iva-auto-procesar' });
-    chkAuto.checked = autoProcesar;
-    autoLabel.append(chkAuto, document.createTextNode(' Procesar automaticamente al terminar el modo auto'));
-
-    const aviso = el('p', { class: 'sri-iva-aviso' },
-      'Revise los datos antes de enviar: el contribuyente es responsable de lo presentado al SRI.');
-
-    cuerpo.append(status, btnFill, btnNext, btnAuto, btnStop, autoLabel, btnClear, logDiv, custom, aviso);
-    panel.append(header, cuerpo);
-    document.body.appendChild(panel);
-
-    // Eventos
-    btnFill.addEventListener('click', async () => {
-      if (autoRunning) return;
-      autoRunning = true;
-      actualizarBotones();
-      setStatus('Procesando pagina...', 'working');
-      try {
-        const r = await procesarPaginaActual();
-        if (r.incompletas > 0) {
-          setStatus(`${r.incompletas} factura(s) sin categoria`, 'warn');
-          mostrarNotificacion(`${r.incompletas} factura(s) sin tipo de gasto. Complete manualmente.`, 'error');
-        } else {
-          setStatus('Pagina lista - Revise', 'done');
-        }
-      } finally {
-        autoRunning = false;
-        stopRequested = false;
-        actualizarBotones();
-      }
-    });
-
-    btnNext.addEventListener('click', () => {
-      if (hayPaginaSiguiente()) {
-        getPaginador('.ui-paginator-next').click();
-        log('Avanzando a siguiente pagina...', 'info');
-      } else {
-        log('No hay mas paginas', 'warn');
-      }
-    });
-
-    btnAuto.addEventListener('click', () => {
-      if (!autoRunning) procesarTodasLasPaginas();
-    });
-
-    btnStop.addEventListener('click', () => {
-      stopRequested = true;
-      log('Deteniendo...', 'warn');
-    });
-
-    btnClear.addEventListener('click', () => {
-      logDiv.replaceChildren();
-      setStatusBase(true);
-    });
-
-    btnMin.addEventListener('click', () => {
-      panel.classList.toggle('sri-iva-minimizado');
-    });
-
-    btnClose.addEventListener('click', () => {
-      stopRequested = true;
-      cerradoPorUsuario = true;
-      panel.remove();
-    });
-
-    btnToggleCustom.addEventListener('click', () => {
-      customBody.hidden = !customBody.hidden;
-    });
-
-    chkAuto.addEventListener('change', () => {
-      autoProcesar = chkAuto.checked;
-      chrome.storage.local.set({ [STORAGE_AUTO]: autoProcesar });
-    });
-
-    btnExport.addEventListener('click', exportarCategorias);
-    btnImport.addEventListener('click', () => inputArchivo.click());
-    inputArchivo.addEventListener('change', () => {
-      if (inputArchivo.files[0]) importarCategorias(inputArchivo.files[0]);
-      inputArchivo.value = '';
-    });
-
-    const agregar = () => {
-      const nombre = inputNombre.value.trim().toUpperCase();
-      if (!nombre) return;
-      categoriasCustom[nombre] = selectCat.value;
-      guardarCategoriasCustom();
-      renderListaCustom();
-      inputNombre.value = '';
-      log(`Categoria agregada: ${nombre} -> ${getNombreCategoria(selectCat.value)}`, 'ok');
+    const enPeriodos = !!getPantallaPeriodos();
+    const total = logBase + logLineas.length;
+    const pedido = request.logGen === logGen ? (Number(request.logDesde) || 0) : 0;
+    const desde = Math.min(Math.max(pedido, logBase), total);
+    let base = { msg: 'Consulte las facturas del periodo para comenzar', tipo: 'warn' };
+    if (hayTabla) base = { msg: 'Listo', tipo: 'done' };
+    else if (enPeriodos) base = { msg: 'Elija el periodo o busque los pendientes', tipo: 'done' };
+    return {
+      hayTabla,
+      enPeriodos,
+      procesando: autoRunning || buscando,
+      hayPaginaSiguiente: hayPaginaSiguiente(),
+      status: statusAccion || base,
+      // Busqueda de periodos pendientes (null si no se ha buscado), con los
+      // periodos consultados en el orden en que se recorren
+      busqueda: busqueda && {
+        activa: busqueda.activa,
+        completa: busqueda.completa,
+        hayMasAnios: busqueda.hayMasAnios,
+        anios: busqueda.anios,
+        resultados: Object.values(busqueda.resultados)
+          .sort((a, b) => (Number(b.anio) - Number(a.anio)) || (Number(a.periodo) - Number(b.periodo)))
+      },
+      logGen,
+      logDesde: desde,
+      logTotal: total,
+      log: logLineas.slice(desde - logBase)
     };
-    btnAdd.addEventListener('click', agregar);
-    inputNombre.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); agregar(); }
-    });
-
-    renderListaCustom();
-    actualizarBotones();
-  }
-
-  function abrirPanel() {
-    cerradoPorUsuario = false;
-    crearPanel();
-    $(PANEL_ID)?.classList.remove('sri-iva-minimizado');
   }
 
   // =====================================================
   // Deteccion de la tabla de facturas
   // =====================================================
 
+  let avisoTablaMostrado = false;
+
   /**
-   * Abre el panel automaticamente cuando aparece la tabla de facturas (la
-   * consulta del SRI es AJAX, no recarga la pagina) y mantiene los botones
-   * habilitados segun haya tabla. Debounce para no recorrer el DOM en cada
-   * mutacion.
+   * Cuando aparece la tabla de facturas (la consulta del SRI es AJAX, no
+   * recarga la pagina) avisa una vez que el asistente esta disponible en la
+   * extension, y revisa los tipos de gasto de las filas. En la pantalla de
+   * anio/periodo arranca o reanuda la busqueda de pendientes. Debounce para
+   * no recorrer el DOM en cada mutacion.
    */
   function revisarTabla() {
-    if (getTbody() && !$(PANEL_ID) && !cerradoPorUsuario) crearPanel();
-    actualizarBotones();
+    if (getTbody() && !avisoTablaMostrado) {
+      avisoTablaMostrado = true;
+      mostrarNotificacion('Facturas detectadas: abra la extension para usar el asistente de devolucion de IVA', 'mini');
+    }
+    revisarSelecciones();
+    revisarPeriodos();
   }
 
   let revisionPendiente = null;
@@ -687,24 +1072,57 @@ if (window.SRI_IVA_LOADED) {
       revisarTabla();
     }, 500);
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 
   // =====================================================
   // Mensajes del popup
   // =====================================================
 
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'ivaEstado') {
-      sendResponse({ hayTabla: !!getTbody(), panelAbierto: !!$(PANEL_ID), procesando: autoRunning });
-    } else if (request.action === 'ivaAbrirPanel') {
-      abrirPanel();
-      sendResponse({ ok: true, hayTabla: !!getTbody() });
+    switch (request.action) {
+      case 'ivaEstado':
+        break;
+      case 'ivaRellenarPagina':
+        rellenarPagina();
+        break;
+      case 'ivaSiguientePagina':
+        siguientePagina();
+        break;
+      case 'ivaAuto':
+        procesarTodasLasPaginas();
+        break;
+      case 'ivaDetener':
+        if (autoRunning || buscando) {
+          stopRequested = true;
+          log('Deteniendo...', 'warn');
+        }
+        // La busqueda se marca detenida tambien en sessionStorage: si la
+        // pagina se esta recargando, la siguiente carga no la reanuda
+        if (busqueda?.activa) {
+          Object.assign(busqueda, { activa: false, detenida: true });
+          guardarBusqueda();
+        }
+        break;
+      case 'ivaLimpiarLog':
+        // Durante un proceso el estado "Procesando..." debe seguir visible
+        if (!autoRunning && !buscando) limpiarLog();
+        break;
+      case 'ivaBuscarPeriodos':
+        iniciarBusquedaPeriodos(request.todos === true);
+        break;
+      case 'ivaAbrirPeriodo':
+        abrirPeriodo(request.anio, request.periodo);
+        break;
+      default:
+        // Otras acciones son de content.js: no responder
+        return false;
     }
-    // Otras acciones son de content.js: no responder
+    // Todas las acciones del asistente responden con el estado actualizado
+    sendResponse(estadoParaPopup(request));
     return false;
   });
 
-  cargarCategoriasCustom();
+  cargarPreferencias();
   revisarTabla();
 })();
 

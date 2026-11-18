@@ -9,7 +9,7 @@
   html, body { margin: 0; width: 1280px; height: 722px; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; background: #eef1f5; }
   .portal { height: 46px; background: #0d3b8c; color: #fff; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; font-weight: 600; font-size: 15px; }
   .portal small { font-weight: 400; font-size: 11px; text-align: right; line-height: 1.3; opacity: .9; }
-  .contenido { padding: 22px 30px; width: 950px; }
+  .contenido { padding: 22px 30px; width: 890px; }
   h2 { font-size: 19px; color: #1d2433; margin: 0 0 6px; }
   p.sub { font-size: 12px; color: #555; margin: 0 0 14px; }
   table { width: 100%; border-collapse: collapse; background: #fff; font-size: 11.5px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
@@ -40,14 +40,16 @@
   </div>
 
 <script>
-  // Mock minimo de chrome.* para iva.js
+  // Mock minimo de chrome.* para iva.js. Se guarda su listener de mensajes
+  // para enviarle acciones como lo haria el popup
   const storage = { ivaCategoriasCustom: { 'RESTAURANTE': '4' } };
+  let listenerIva = null;
   window.chrome = {
     storage: { local: {
       get(keys, cb) { const o = {}; (Array.isArray(keys) ? keys : [keys]).forEach(k => { if (k in storage) o[k] = storage[k]; }); cb(o); },
       set(o) { Object.assign(storage, o); }
-    } },
-    runtime: { onMessage: { addListener() {} } }
+    }, onChanged: { addListener() {} } },
+    runtime: { onMessage: { addListener(fn) { listenerIva = fn; } } }
   };
 
   const filas = [
@@ -75,11 +77,23 @@
 <script src="iva-categorias.js"></script>
 <script src="iva.js"></script>
 <script>
-  // Mostrar el asistente trabajando: rellenar la pagina y abrir las categorias
+  // Mostrar el asistente trabajando: "Rellenar esta pagina" y, al terminar,
+  // el usuario elige a mano el tipo de gasto de la factura sin categoria
+  // (iva.js la guarda como categoria personalizada y lo avisa en la pagina)
   setTimeout(() => {
-    document.getElementById('sri-iva-toggle-custom')?.click();
-    document.getElementById('sri-iva-btn-fill')?.click();
-  }, 300);
+    listenerIva({ action: 'ivaRellenarPagina' }, {}, () => {});
+    const espera = setInterval(() => {
+      let procesando = true;
+      listenerIva({ action: 'ivaEstado' }, {}, (estado) => { procesando = estado.procesando; });
+      if (procesando) return;
+      clearInterval(espera);
+      const select = document.getElementById('frm:t:5:cmbTipoGasto_input');
+      const label = document.getElementById('frm:t:5:cmbTipoGasto_label');
+      select.value = '4';
+      label.textContent = 'Alimentación';
+      label.classList.remove('ui-selectonemenu-label-empty');
+    }, 500);
+  }, 1200);
 </script>
 </body>
 </html>

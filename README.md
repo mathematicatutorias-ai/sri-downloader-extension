@@ -42,16 +42,24 @@ tanto comprobantes **recibidos** como **emitidos**.
   Guias de Remision en emitidos, Retenciones)
 - **Pre-configuracion automatica**: Al navegar, setea dia="Todos" (recibidos) o consulta
   el dia 1 del mes (emitidos) y el tipo de comprobante automaticamente
-- **13 categorias**: Claves, RUC, Facturacion Electronica, Declaraciones, Anexos, Pagos, Deudas, Devoluciones, Certificados, Vehiculos, Tramites y mas
+- **14 categorias**: Devolucion de IVA, Claves, RUC, Facturacion Electronica, Declaraciones, Anexos, Pagos, Deudas, Devoluciones, Certificados, Vehiculos, Tramites y mas
 
 ### Asistente de devolucion de IVA
 - **Apartado "Devolucion de IVA"** en el menu: lleva a Adultos mayores o Personas con discapacidad
-- **Panel en la pagina**: se abre solo cuando aparece la tabla de facturas de la devolucion
+- **Integrado en el popup**: en las pantallas de la devolucion el popup abre la vista del asistente
+  (estado, botones, registro y categorias). El trabajo se hace en la pagina y sigue aunque el
+  popup se cierre; al reabrirlo se recupera el estado. La pagina solo muestra avisos discretos
+- **Busqueda de periodos pendientes**: al llegar a la pantalla de anio y periodo el popup se abre
+  solo y el asistente consulta periodo por periodo (desde enero de este anio) hasta encontrar uno
+  sin procesar y deja sus facturas en pantalla; anota los que estan en tramite o sin facturas.
+  Se puede detener o desactivar
 - **Por factura**: marca el checkbox, rellena el "IVA solicitado" con el IVA completo y asigna
   el tipo de gasto (Vestimenta, Vivienda, Salud, Alimentacion, Educacion) segun el nombre comercial
 - **Modo automatico**: recorre todas las paginas; si todas quedaron con tipo de gasto pulsa
   "Procesar facturas seleccionadas", si no avisa cuantas faltan completar a mano
 - **Categorias personalizadas**: agrega nombres comerciales propios (tienen prioridad sobre las base), con exportar/importar
+- **Aprende solo**: al elegir a mano el tipo de gasto de un proveedor sin categoria, lo guarda
+  como categoria personalizada para la proxima vez
 - **Envio opcional**: casilla para que el modo automatico no pulse "Procesar" y puedas revisar antes
 - Solo se carga en las pantallas de devolucion (adultos mayores y discapacidad)
 - Es una ayuda: el contribuyente debe revisar los datos antes de enviarlos al SRI
@@ -134,7 +142,7 @@ tanto comprobantes **recibidos** como **emitidos**.
 - **Background (Service Worker)**: Orquesta descargas, reintentos, organizacion de archivos, navegacion SRI
 - **Popup**: Interfaz con 4 tabs, accesos directos SRI, progreso, configuracion
 - **Content Script**: Extrae datos de la tabla del SRI (solo lectura, ~120 lineas)
-- **Asistente IVA** (`iva.js` + `iva.css` + `iva-categorias.js`): panel flotante de devolucion de IVA
+- **Asistente IVA** (`iva.js` + `iva.css` + `iva-categorias.js`): trabaja sobre las pantallas de devolucion de IVA; se maneja desde el popup
 
 ## Permisos
 

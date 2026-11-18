@@ -2024,6 +2024,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
 
+  // Asistente de devolucion de IVA (iva.js): abrir el popup sobre la pestana
+  // del SRI cuando aparece la pantalla de periodos o un periodo pendiente.
+  // Solo si esa pestana es la que el usuario esta viendo. openPopup falla si
+  // la ventana no tiene el foco o el popup ya esta abierto: no es un error
+  if (request.action === 'ivaAbrirPopup') {
+    if (!sender.tab?.active) {
+      sendResponse({ ok: false });
+      return false;
+    }
+    chrome.action.openPopup({ windowId: sender.tab.windowId })
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
   if (request.action === 'obtenerHistorial') {
     obtenerHistorial(request.ruc)
       .then(historial => sendResponse({ historial }))

@@ -24,9 +24,14 @@ let origenDetectado = 'recibidos';
 let contentDisponible = false;
 
 /**
- * @type {{hayTabla: boolean, panelAbierto: boolean, procesando: boolean}|null}
+ * @type {{hayTabla: boolean, enPeriodos: boolean, procesando: boolean,
+ *   hayPaginaSiguiente: boolean, status: {msg: string, tipo: string},
+ *   busqueda: {activa: boolean, completa: boolean, hayMasAnios: boolean, anios: string[],
+ *     resultados: Array<{anio: string, periodo: string, nombre: string, estado: string, msg: string}>}|null,
+ *   logGen: number, logDesde: number, logTotal: number,
+ *   log: Array<{msg: string, cls: string}>}|null}
  * Estado del asistente de devolucion de IVA (iva.js) en la tab activa;
- * null si no es una pagina del SRI o el script no respondio
+ * null si no es la app de devoluciones del SRI o el script no respondio
  */
 let estadoIva = null;
 
@@ -92,6 +97,8 @@ const configArea = document.getElementById('configArea');
 const organizacionArea = document.getElementById('organizacionArea');
 /** Area de accesos directos a paginas del SRI */
 const sriLinksArea = document.getElementById('sriLinksArea');
+/** Vista del asistente de devolucion de IVA (controla iva.js en la pagina) */
+const ivaArea = document.getElementById('ivaArea');
 /** Boton para guardar la configuracion */
 const btnGuardarConfig = document.getElementById('btnGuardarConfig');
 /** Boton para restaurar la configuracion a valores por defecto */
@@ -109,6 +116,7 @@ const configStatus = document.getElementById('configStatus');
  */
 function mostrarSriLinks() {
   contentDisponible = false;
+  ocultarAsistenteIva();
   contentArea.style.display = 'none';
   historialArea.style.display = 'none';
   configArea.style.display = 'none';
@@ -491,18 +499,21 @@ async function cargarDocumentos() {
 
 /**
  * Pagina del SRI sin tabla de comprobantes: consulta el estado del asistente
- * de IVA y muestra el menu de accesos directos (con el boton del asistente
- * si la tabla de facturas de devolucion esta en pantalla).
+ * de IVA. Si hay algo que hacer con el (tabla de facturas de devolucion o
+ * pantalla de anio/periodo a la vista, o un proceso en curso) abre
+ * directamente su vista; si no, el menu de accesos directos.
  * @param {number} tabId
  */
 async function mostrarSinTablaComprobantes(tabId) {
+  ivaTabId = tabId;
   estadoIva = await consultarEstadoIva(tabId);
-  if (estadoIva?.hayTabla) {
-    mostrarEstado('Facturas de devolucion de IVA detectadas. El asistente rellena el IVA solicitado y el tipo de gasto en la pagina.', 'info');
+  // El mensaje queda puesto para el menu (la vista del asistente lo oculta)
+  mostrarEstado('Navega y genera la consulta de los comprobantes para descargar.', 'info');
+  if (estadoIva?.hayTabla || estadoIva?.enPeriodos || estadoIva?.procesando) {
+    mostrarAsistenteIva();
   } else {
-    mostrarEstado('Navega y genera la consulta de los comprobantes para descargar.', 'info');
+    mostrarSriLinks();
   }
-  mostrarSriLinks();
 }
 
 /**
@@ -510,7 +521,7 @@ async function mostrarSinTablaComprobantes(tabId) {
  * responde (tab abierta antes de instalar/actualizar la extension) lo inyecta
  * junto con su CSS y reintenta una vez.
  * @param {number} tabId
- * @returns {Promise<Object|null>} {hayTabla, panelAbierto, procesando} o null
+ * @returns {Promise<Object|null>} Estado del asistente (ver estadoIva) o null
  */
 async function consultarEstadoIva(tabId) {
   const preguntar = () => new Promise((resolve) => {
@@ -537,22 +548,423 @@ async function consultarEstadoIva(tabId) {
       target: { tabId },
       files: ['config.js', 'iva-categorias.js', 'iva.js']
     });
-    estado = await preguntar();
   } catch (e) {
-    // Pagina no inyectable: sin asistente
+    // Pagina no inyectable (o recargandose): se reintenta preguntar abajo
+  }
+  // La busqueda de periodos recarga la pagina en cada periodo: si el popup
+  // se abre justo en una recarga, iva.js tarda un momento en contestar
+  for (let intento = 0; intento < 5 && !estado; intento++) {
+    if (intento > 0) await new Promise(r => setTimeout(r, 500));
+    estado = await preguntar();
   }
   return estado;
 }
 
+// =====================================================
+// Asistente de devolucion de IVA
+// =====================================================
+// La vista del popup es solo el control remoto: el trabajo lo hace iva.js en
+// la pagina del SRI y sigue aunque el popup se cierre. Al reabrirlo, el
+// estado y el registro se recuperan con 'ivaEstado'.
+
+const IVA_STORAGE_CATEGORIAS = 'ivaCategoriasCustom';
+const IVA_STORAGE_AUTO = 'ivaAutoProcesar';
+const IVA_STORAGE_BUSCAR = 'ivaAutoBuscar';
+/** Cada cuanto se consulta el estado a iva.js mientras la vista esta abierta (ms) */
+const IVA_SONDEO_MS = 500;
 /**
- * Abre el panel del asistente de devolucion de IVA en la pagina y cierra el
- * popup (el proceso corre en la pagina, no depende del popup).
+ * Consultas seguidas sin respuesta que se toleran antes de avisar: la
+ * busqueda de periodos recarga la pagina del SRI en cada periodo y durante
+ * la recarga iva.js no contesta
  */
-async function abrirAsistenteIva() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  chrome.tabs.sendMessage(tab.id, { action: 'ivaAbrirPanel' }, () => {
-    void chrome.runtime.lastError; // Sin receptor: nada que abrir
-    window.close();
+const IVA_FALLOS_TOLERADOS = 8;
+
+/** @type {number|null} Tab del SRI donde corre iva.js */
+let ivaTabId = null;
+let ivaSondeo = null;
+let ivaFallos = 0;
+/** Firma de la lista de periodos pintada (no reconstruirla en cada sondeo) */
+let ivaPeriodosFirma = '';
+/** Log ya pintado: identificador del log de iva.js y cantidad de lineas recibidas */
+let ivaLogGen = 0;
+let ivaLogTotal = 0;
+/** @type {Object<string, string>} nombre comercial (MAYUSCULAS) -> tipo de gasto */
+let ivaCategorias = {};
+
+const ivaStatus = document.getElementById('ivaStatus');
+const ivaAcciones = document.getElementById('ivaAcciones');
+const ivaBtnAuto = document.getElementById('ivaBtnAuto');
+const ivaBtnFill = document.getElementById('ivaBtnFill');
+const ivaBtnNext = document.getElementById('ivaBtnNext');
+const ivaBtnStop = document.getElementById('ivaBtnStop');
+const ivaBtnClear = document.getElementById('ivaBtnClear');
+const ivaAutoProcesar = document.getElementById('ivaAutoProcesar');
+const ivaAutoProcesarWrap = document.getElementById('ivaAutoProcesarWrap');
+const ivaPeriodosSection = document.getElementById('ivaPeriodosSection');
+const ivaPeriodosLista = document.getElementById('ivaPeriodosLista');
+const ivaPeriodosResumen = document.getElementById('ivaPeriodosResumen');
+const ivaBtnBuscar = document.getElementById('ivaBtnBuscar');
+const ivaBtnBuscarTodos = document.getElementById('ivaBtnBuscarTodos');
+const ivaAutoBuscar = document.getElementById('ivaAutoBuscar');
+const ivaLogSection = document.getElementById('ivaLogSection');
+const ivaLog = document.getElementById('ivaLog');
+const ivaCatNombre = document.getElementById('ivaCatNombre');
+const ivaCatTipo = document.getElementById('ivaCatTipo');
+const ivaCatLista = document.getElementById('ivaCatLista');
+const ivaCatStatus = document.getElementById('ivaCatStatus');
+const ivaArchivo = document.getElementById('ivaArchivo');
+
+/**
+ * Muestra la vista del asistente en lugar del menu de accesos directos.
+ * Sin iva.js en la tab (estadoIva null) solo sirve para administrar las
+ * categorias personalizadas: los botones de accion quedan deshabilitados.
+ */
+function mostrarAsistenteIva() {
+  contentDisponible = false;
+  contentArea.style.display = 'none';
+  historialArea.style.display = 'none';
+  configArea.style.display = 'none';
+  organizacionArea.style.display = 'none';
+  sriLinksArea.style.display = 'none';
+  statusBox.style.display = 'none';
+  document.querySelector('.tabs').style.display = 'none';
+  document.body.classList.add('modo-iva');
+  ivaArea.style.display = 'block';
+
+  cargarCategoriasIva();
+  aplicarEstadoIva(estadoIva);
+  if (estadoIva && !ivaSondeo) {
+    ivaSondeo = setInterval(async () => aplicarEstadoIva(await pedirIva('ivaEstado')), IVA_SONDEO_MS);
+  }
+}
+
+function ocultarAsistenteIva() {
+  clearInterval(ivaSondeo);
+  ivaSondeo = null;
+  ivaArea.style.display = 'none';
+  document.body.classList.remove('modo-iva');
+}
+
+/**
+ * Envia una accion a iva.js. Todas responden con el estado actualizado; el
+ * log viaja incremental (solo las lineas posteriores a las ya pintadas).
+ * @param {string} action - ivaEstado | ivaRellenarPagina | ivaSiguientePagina |
+ *   ivaAuto | ivaDetener | ivaLimpiarLog | ivaBuscarPeriodos | ivaAbrirPeriodo
+ * @param {Object} [datos] - Parametros de la accion (ej. {anio, periodo})
+ * @returns {Promise<Object|null>} Estado, o null si iva.js no respondio
+ */
+function pedirIva(action, datos = {}) {
+  return new Promise((resolve) => {
+    if (ivaTabId === null) return resolve(null);
+    chrome.tabs.sendMessage(ivaTabId, { ...datos, action, logGen: ivaLogGen, logDesde: ivaLogTotal }, (response) => {
+      resolve(chrome.runtime.lastError || !response || 'error' in response ? null : response);
+    });
+  });
+}
+
+/**
+ * Pinta el estado de iva.js: mensaje, botones segun haya tabla o proceso en
+ * curso, y las lineas nuevas del registro.
+ * @param {Object|null} estado - Respuesta de iva.js; null = sin comunicacion
+ */
+function aplicarEstadoIva(estado) {
+  if (!estado?.status) {
+    // Sin iva.js en la tab, o la pagina se esta recargando (pasajero)
+    if (estadoIva && ++ivaFallos < IVA_FALLOS_TOLERADOS) return;
+    ivaStatus.textContent = estadoIva
+      ? 'Sin respuesta de la pagina. Si continua, recarga la pagina del SRI.'
+      : 'Abre la devolucion de IVA en el SRI para usar el asistente.';
+    ivaStatus.className = 'iva-status iva-status-warn';
+    ivaAcciones.style.display = 'block';
+    ivaBtnStop.style.display = 'none';
+    ivaBtnAuto.disabled = ivaBtnFill.disabled = ivaBtnNext.disabled = true;
+    return;
+  }
+  ivaFallos = 0;
+  estadoIva = estado;
+
+  ivaStatus.textContent = estado.status.msg;
+  ivaStatus.className = `iva-status iva-status-${estado.status.tipo}`;
+
+  // Los botones de relleno no aplican en la pantalla de anio/periodo
+  const conRelleno = estado.hayTabla || !estado.enPeriodos;
+  ivaAcciones.style.display = !estado.procesando && conRelleno ? 'block' : 'none';
+  ivaAutoProcesarWrap.style.display = conRelleno ? 'flex' : 'none';
+  ivaBtnStop.style.display = estado.procesando ? 'block' : 'none';
+  ivaBtnAuto.disabled = ivaBtnFill.disabled = !estado.hayTabla;
+  ivaBtnNext.disabled = !estado.hayTabla || !estado.hayPaginaSiguiente;
+  ivaBtnClear.disabled = estado.procesando;
+  renderPeriodosIva(estado);
+
+  // Registro. Otro logGen = log nuevo (se limpio o la pagina se recargo).
+  // Una respuesta puede traer lineas ya pintadas por otra que llego antes
+  // (sondeo y accion en paralelo): logDesde dice donde empieza cada una
+  if (estado.logGen !== ivaLogGen) {
+    ivaLog.replaceChildren();
+    ivaLogGen = estado.logGen;
+    ivaLogTotal = estado.logDesde;
+  }
+  const lineas = estado.log.slice(Math.max(ivaLogTotal - estado.logDesde, 0));
+  for (const { msg, cls } of lineas) {
+    const linea = document.createElement('div');
+    linea.className = cls;
+    linea.textContent = msg;
+    ivaLog.appendChild(linea);
+  }
+  ivaLogTotal = Math.max(ivaLogTotal, estado.logTotal);
+  ivaLogSection.style.display = ivaLog.childElementCount > 0 ? 'block' : 'none';
+  if (lineas.length > 0) ivaLog.scrollTop = ivaLog.scrollHeight;
+}
+
+/**
+ * Seccion "Periodos pendientes": resultado de la busqueda que hace iva.js en
+ * la pantalla de anio/periodo. Lista los pendientes (con "Abrir", que deja
+ * sus facturas en pantalla) y resume el resto.
+ * @param {Object} estado - Estado de iva.js
+ */
+function renderPeriodosIva(estado) {
+  const b = estado.busqueda;
+  ivaPeriodosSection.style.display = estado.enPeriodos || b ? 'block' : 'none';
+  ivaBtnBuscar.disabled = !estado.enPeriodos || estado.procesando;
+  ivaBtnBuscar.textContent = b ? 'Buscar de nuevo' : 'Buscar';
+  ivaBtnBuscarTodos.style.display =
+    b?.completa && b.hayMasAnios && estado.enPeriodos && !estado.procesando ? 'block' : 'none';
+
+  const resultados = b?.resultados || [];
+  const pendientes = resultados.filter(r => r.estado === 'pendiente');
+  const puedeAbrir = estado.enPeriodos && !estado.procesando;
+
+  // La lista solo se reconstruye si cambio (el sondeo llega cada 500 ms y
+  // rehacer los botones a mitad de un click lo perderia)
+  const firma = JSON.stringify([pendientes.map(r => `${r.anio}-${r.periodo}`), puedeAbrir]);
+  if (firma !== ivaPeriodosFirma) {
+    ivaPeriodosFirma = firma;
+    ivaPeriodosLista.replaceChildren();
+    for (const r of pendientes) {
+      const item = document.createElement('div');
+      item.className = 'iva-periodo';
+      const nombre = document.createElement('span');
+      nombre.textContent = r.nombre;
+      const abrir = document.createElement('button');
+      abrir.type = 'button';
+      abrir.className = 'btn-small';
+      abrir.textContent = 'Abrir';
+      abrir.disabled = !puedeAbrir;
+      abrir.title = puedeAbrir
+        ? 'Consulta el periodo y deja sus facturas en pantalla'
+        : 'Disponible en la pantalla de anio y periodo del SRI';
+      abrir.addEventListener('click', () => accionIva('ivaAbrirPeriodo', { anio: r.anio, periodo: r.periodo }));
+      item.append(nombre, abrir);
+      ivaPeriodosLista.appendChild(item);
+    }
+  }
+
+  if (!b) {
+    ivaPeriodosResumen.textContent = 'Todavia no se han buscado los periodos pendientes.';
+    return;
+  }
+  const contar = (e) => resultados.filter(r => r.estado === e).length;
+  const partes = [];
+  if (pendientes.length === 0) partes.push(b.completa ? 'Ningun periodo pendiente.' : 'Ningun periodo pendiente hasta ahora.');
+  const detalle = [[contar('tramite'), 'en tramite'], [contar('sinFacturas'), 'sin facturas']]
+    .filter(([n]) => n > 0).map(([n, texto]) => `${n} ${texto}`).join(', ');
+  partes.push(`Consultados ${resultados.length} en ${b.anios.join(', ')}${detalle ? `: ${detalle}` : ''}.`);
+  // La busqueda se detiene en el primer pendiente: puede haber mas atras
+  if (pendientes.length > 0 && !b.completa) partes.push('Los periodos anteriores se revisan al volver a la pantalla de periodos.');
+  // Motivos que el asistente no reconoce: se muestran tal como los dio el SRI
+  for (const r of resultados.filter(x => x.estado === 'otro')) partes.push(`${r.nombre}: ${r.msg}`);
+  ivaPeriodosResumen.textContent = partes.join(' ');
+}
+
+/**
+ * Ejecuta una accion del asistente y refleja el estado que devuelve.
+ * @param {string} action
+ * @param {Object} [datos] - Parametros de la accion
+ */
+async function accionIva(action, datos) {
+  aplicarEstadoIva(await pedirIva(action, datos));
+}
+
+// --- Categorias personalizadas (chrome.storage.local, compartido con iva.js) ---
+
+function cargarCategoriasIva() {
+  chrome.storage.local.get([IVA_STORAGE_CATEGORIAS, IVA_STORAGE_AUTO, IVA_STORAGE_BUSCAR], (data) => {
+    ivaCategorias = data?.[IVA_STORAGE_CATEGORIAS] || {};
+    ivaAutoProcesar.checked = data?.[IVA_STORAGE_AUTO] !== false;
+    ivaAutoBuscar.checked = data?.[IVA_STORAGE_BUSCAR] !== false;
+    renderCategoriasIva();
+  });
+}
+
+function guardarCategoriasIva() {
+  chrome.storage.local.set({ [IVA_STORAGE_CATEGORIAS]: ivaCategorias });
+  renderCategoriasIva();
+}
+
+/** Opciones de tipo de gasto del SRI para un <select> */
+function llenarSelectTipoGasto(select, seleccionado) {
+  for (const [valor, nombre] of Object.entries(SRI_CONFIG.IVA.TIPOS_GASTO)) {
+    const opt = document.createElement('option');
+    opt.value = valor;
+    opt.textContent = nombre;
+    opt.selected = valor === seleccionado;
+    select.appendChild(opt);
+  }
+}
+
+/**
+ * Lista de categorias personalizadas, en orden alfabetico. Cada una permite
+ * cambiar el tipo de gasto (las que se guardan solas al elegir a mano en la
+ * pagina pueden necesitar correccion) o eliminarla.
+ */
+function renderCategoriasIva() {
+  const nombres = Object.keys(ivaCategorias).sort((a, b) => a.localeCompare(b));
+  document.getElementById('ivaCatTotal').textContent = nombres.length;
+  ivaCatLista.replaceChildren();
+
+  if (nombres.length === 0) {
+    const vacio = document.createElement('p');
+    vacio.className = 'empty-msg';
+    vacio.style.padding = '10px';
+    vacio.textContent = 'No hay categorias personalizadas';
+    ivaCatLista.appendChild(vacio);
+    return;
+  }
+
+  for (const nombre of nombres) {
+    const item = document.createElement('div');
+    item.className = 'iva-cat-item';
+
+    const texto = document.createElement('span');
+    texto.textContent = nombre;
+
+    const select = document.createElement('select');
+    select.className = 'config-input';
+    select.title = 'Tipo de gasto';
+    llenarSelectTipoGasto(select, ivaCategorias[nombre]);
+    select.addEventListener('change', () => {
+      ivaCategorias[nombre] = select.value;
+      chrome.storage.local.set({ [IVA_STORAGE_CATEGORIAS]: ivaCategorias });
+    });
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'iva-cat-del';
+    del.textContent = '×';
+    del.title = 'Eliminar';
+    del.addEventListener('click', () => {
+      delete ivaCategorias[nombre];
+      guardarCategoriasIva();
+    });
+
+    item.append(texto, select, del);
+    ivaCatLista.appendChild(item);
+  }
+}
+
+function mostrarEstadoCategorias(mensaje, ok = true) {
+  ivaCatStatus.textContent = mensaje;
+  ivaCatStatus.style.color = ok ? '#4caf50' : '#f44336';
+}
+
+function agregarCategoriaIva() {
+  const nombre = ivaCatNombre.value.trim().toUpperCase();
+  if (!nombre) return;
+  ivaCategorias[nombre] = ivaCatTipo.value;
+  guardarCategoriasIva();
+  ivaCatNombre.value = '';
+  mostrarEstadoCategorias(`Agregada: ${nombre} -> ${SRI_CONFIG.IVA.TIPOS_GASTO[ivaCatTipo.value]}`);
+}
+
+/**
+ * Descarga las categorias personalizadas como JSON (respaldo o para pasarlas
+ * a otro equipo).
+ */
+function exportarCategoriasIva() {
+  if (Object.keys(ivaCategorias).length === 0) {
+    mostrarEstadoCategorias('No hay categorias para exportar', false);
+    return;
+  }
+  const blob = new Blob([JSON.stringify(ivaCategorias, null, 2)], { type: 'application/json' });
+  chrome.downloads.download({
+    url: URL.createObjectURL(blob),
+    filename: 'categorias_devolucion_iva.json',
+    saveAs: true
+  });
+}
+
+/**
+ * Importa categorias desde un JSON {"NOMBRE COMERCIAL": "4", ...} (el formato
+ * que exporta la extension y el de categorias.json de la extension anterior).
+ * Se SUMAN a las existentes; las entradas invalidas se ignoran.
+ * @param {File} archivo
+ */
+async function importarCategoriasIva(archivo) {
+  try {
+    const datos = JSON.parse(await archivo.text());
+    if (!datos || typeof datos !== 'object' || Array.isArray(datos)) throw new Error('formato no valido');
+    let agregadas = 0;
+    for (const [nombre, valor] of Object.entries(datos)) {
+      const clave = String(nombre).trim().toUpperCase();
+      const tipo = String(valor);
+      if (clave && SRI_CONFIG.IVA.TIPOS_GASTO[tipo]) {
+        ivaCategorias[clave] = tipo;
+        agregadas++;
+      }
+    }
+    guardarCategoriasIva();
+    mostrarEstadoCategorias(`Categorias importadas: ${agregadas}`, agregadas > 0);
+  } catch (e) {
+    mostrarEstadoCategorias(`No se pudo importar el archivo: ${e.message}`, false);
+  }
+}
+
+// iva.js guarda categorias por su cuenta (cuando el usuario elige a mano el
+// tipo de gasto en la pagina): reflejarlas si la vista esta abierta
+chrome.storage.onChanged?.addListener((changes, area) => {
+  if (area !== 'local' || !changes[IVA_STORAGE_CATEGORIAS]) return;
+  ivaCategorias = changes[IVA_STORAGE_CATEGORIAS].newValue || {};
+  // No re-renderizar mientras el usuario usa un select de la lista
+  if (ivaArea.style.display !== 'none' && !ivaCatLista.contains(document.activeElement)) {
+    renderCategoriasIva();
+  }
+});
+
+llenarSelectTipoGasto(ivaCatTipo, '4');
+ivaBtnAuto.addEventListener('click', () => accionIva('ivaAuto'));
+ivaBtnFill.addEventListener('click', () => accionIva('ivaRellenarPagina'));
+ivaBtnNext.addEventListener('click', () => accionIva('ivaSiguientePagina'));
+ivaBtnStop.addEventListener('click', () => accionIva('ivaDetener'));
+ivaBtnClear.addEventListener('click', () => accionIva('ivaLimpiarLog'));
+ivaAutoProcesar.addEventListener('change', () => {
+  chrome.storage.local.set({ [IVA_STORAGE_AUTO]: ivaAutoProcesar.checked });
+});
+// "Buscar" empieza de cero (los periodos pueden haber cambiado de estado);
+// "anios anteriores" sigue la busqueda hecha, sin repetir lo ya consultado
+ivaBtnBuscar.addEventListener('click', () => accionIva('ivaBuscarPeriodos', { todos: false }));
+ivaBtnBuscarTodos.addEventListener('click', () => accionIva('ivaBuscarPeriodos', { todos: true }));
+ivaAutoBuscar.addEventListener('change', () => {
+  chrome.storage.local.set({ [IVA_STORAGE_BUSCAR]: ivaAutoBuscar.checked });
+});
+document.getElementById('ivaCatAgregar').addEventListener('click', agregarCategoriaIva);
+ivaCatNombre.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); agregarCategoriaIva(); }
+});
+document.getElementById('ivaBtnExport').addEventListener('click', exportarCategoriasIva);
+document.getElementById('ivaBtnImport').addEventListener('click', () => ivaArchivo.click());
+ivaArchivo.addEventListener('change', () => {
+  if (ivaArchivo.files[0]) importarCategoriasIva(ivaArchivo.files[0]);
+  ivaArchivo.value = '';
+});
+{
+  const volver = document.getElementById('ivaVolver');
+  const irAlMenu = () => {
+    statusBox.style.display = 'block';
+    mostrarSriLinks();
+  };
+  volver.addEventListener('click', irAlMenu);
+  volver.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); irAlMenu(); }
   });
 }
 
@@ -824,6 +1236,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     const tab = btn.dataset.tab;
 
     // Ocultar todas las areas de contenido
+    ocultarAsistenteIva();
     contentArea.style.display = 'none';
     historialArea.style.display = 'none';
     configArea.style.display = 'none';
@@ -1572,12 +1985,16 @@ const SRI_MENU = [
     { nombre: 'Guias de Remision', esEmitidos: true, url: 'https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=60&idGrupo=58', tipoComprobante: '5' },
     { nombre: 'Comprobantes de Retencion', esEmitidos: true, url: 'https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=60&idGrupo=58', tipoComprobante: '6' },
   ]},
-  // Devolucion de IVA: cada opcion solo navega. Cuando en la pagina aparece
-  // la tabla de facturas (tblFacturas), iva.js abre solo el panel del
-  // asistente que rellena IVA solicitado + tipo de gasto
-  { nombre: 'Devolucion de IVA', primary: true, esIva: true, items: [
+  // Devolucion de IVA: las dos primeras opciones solo navegan. Cuando en la
+  // pagina aparece la tabla de facturas (tblFacturas), el popup abre la vista
+  // del asistente (rellena IVA solicitado + tipo de gasto via iva.js). La
+  // tercera abre esa vista desde cualquier pagina, para administrar las
+  // categorias personalizadas. Va en la grilla como los demas apartados,
+  // antes de Claves
+  { nombre: 'Devolucion de IVA', items: [
     { nombre: 'Personas con discapacidad', url: 'https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=130&idGrupo=127' },
     { nombre: 'Adultos mayores', url: 'https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=129&idGrupo=127' },
+    { nombre: 'Asistente y categorias', esAsistenteIva: true },
   ]},
   { nombre: 'Claves', items: [
     { nombre: 'Cambiar clave', url: 'https://srienlinea.sri.gob.ec/sri-en-linea/SriClaves/Generacion/internet/actualizar' },
@@ -1661,21 +2078,20 @@ function renderSriMenu() {
   const container = document.getElementById('sriMenuContainer');
   container.innerHTML = '';
 
-  // En la pantalla de devolucion de IVA con la tabla de facturas: acceso al
-  // asistente (el panel se abre solo, esto sirve para reabrirlo si se cerro)
-  if (estadoIva?.hayTabla) {
+  // En la app de devolucion de IVA con algo que hacer (tabla de facturas o
+  // pantalla de periodos): acceso destacado para volver a la vista del asistente
+  if (estadoIva?.hayTabla || estadoIva?.enPeriodos || estadoIva?.procesando) {
     container.appendChild(crearLinkSri(
-      'Abrir asistente de devolucion IVA',
+      'Asistente de devolucion IVA',
       'sri-link sri-link-primary sri-link-iva sri-link-iva-activo',
-      abrirAsistenteIva
+      mostrarAsistenteIva
     ));
   }
 
-  // Renderizar botones primarios destacados (recibidos / emitidos / IVA)
+  // Renderizar botones primarios destacados (recibidos / emitidos)
   SRI_MENU.filter(m => m.primary).forEach(primary => {
     let clases = 'sri-link sri-link-primary';
     if (primary.esEmitidos) clases += ' sri-link-emitidos';
-    if (primary.esIva) clases += ' sri-link-iva';
     let accion;
     if (primary.items) {
       accion = () => renderSriSubmenu(primary);
@@ -1757,9 +2173,12 @@ function renderSriSubmenu(category) {
   grid.className = 'sri-links-grid';
 
   category.items.forEach(item => {
-    grid.appendChild(crearLinkSri(item.nombre, 'sri-link', () => item.esEmitidos
-      ? navegarSRIEmitidos(item.url, item.tipoComprobante)
-      : navegarSRI(item.url, item.tipoComprobante)));
+    grid.appendChild(crearLinkSri(item.nombre, 'sri-link', () => {
+      if (item.esAsistenteIva) return mostrarAsistenteIva();
+      return item.esEmitidos
+        ? navegarSRIEmitidos(item.url, item.tipoComprobante)
+        : navegarSRI(item.url, item.tipoComprobante);
+    }));
   });
 
   container.appendChild(grid);

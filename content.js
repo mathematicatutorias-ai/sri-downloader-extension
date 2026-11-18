@@ -115,7 +115,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const paginacion = obtenerPaginacion();
     sendResponse({ ...datos, paginacion });
   }
-  // Otras acciones (ej. ivaEstado / ivaAbrirPanel de iva.js) no se responden
+  // Otras acciones (las iva* de iva.js: ivaEstado, ivaAuto...) no se responden
   // aqui: responder con error pisaria la respuesta del otro listener
   return false;
 });

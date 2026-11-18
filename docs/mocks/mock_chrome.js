@@ -55,7 +55,32 @@
     }
   };
 
+  // Asistente de devolucion de IVA: estado que devolveria iva.js tras
+  // "Rellenar esta pagina" sobre las facturas ficticias de iva_page.html
+  const linea = (msg, cls = 'info') => ({ msg, cls });
+  const logIva = [
+    linea('Procesando 6 facturas...'),
+    linea('Fila 1: FARMACIA SAN RAFAEL...'), linea('  IVA: $2.35', 'ok'), linea('  Gasto: Salud', 'ok'),
+    linea('Fila 2: FERRETERIA EL CONSTRUCTOR...'), linea('  IVA: $5.10', 'ok'), linea('  Gasto: Vivienda', 'ok'),
+    linea('Fila 3: LIBRERIA Y PAPELERIA ESTUDIANT...'), linea('  IVA: $1.80', 'ok'), linea('  Gasto: Educacion', 'ok'),
+    linea('Fila 4: RESTAURANTE LA ESQUINA...'), linea('  IVA: $3.45', 'ok'), linea('  Gasto: Alimentacion', 'ok'),
+    linea('Fila 5: CLINICA SANTA ANA...'), linea('  IVA: $12.00', 'ok'), linea('  Gasto: Salud', 'ok'),
+    linea('Fila 6: COMERCIAL DEL VALLE S.A....'), linea('  IVA: $4.20', 'ok'),
+    linea('  SIN CATEGORIA: "COMERCIAL DEL VALLE S.A." - seleccione manualmente (se guardara para la proxima vez)', 'warn'),
+    linea('Pagina completada: 6 facturas', 'ok'),
+    linea('Categoria guardada: COMERCIAL DEL VALLE S.A. -> Alimentacion', 'ok')
+  ];
+  const estadoIva = {
+    hayTabla: true, enPeriodos: false, procesando: false, hayPaginaSiguiente: true,
+    status: { msg: 'Pagina lista - Revise', tipo: 'done' },
+    // Sin busqueda de periodos: su seccion no se muestra y el popup entra
+    // completo en la captura
+    busqueda: null,
+    logGen: 1, logDesde: 0, logTotal: logIva.length, log: logIva
+  };
+
   const escenas = {
+    iva: { docs: { error: 'sin tabla' }, estado: inactivo },
     menu: { docs: { error: 'sin tabla' }, estado: inactivo },
     recibidos: { docs: { documentos: docsRecibidos, total: 8, origen: 'recibidos', paginacion: { actual: 3, total: 5 } }, estado: descargando },
     emitidos: { docs: { documentos: docsEmitidos, total: 12, origen: 'emitidos', paginacion: { actual: 1, total: 1 } }, estado: { ...inactivo, origen: 'emitidos' } },
@@ -63,7 +88,10 @@
   };
   const esc = escenas[scene] || escenas.menu;
 
-  const storage = { ultimoTipoDescarga: scene === 'emitidos' ? 'ambos' : 'xml', emitidosTodosLosTipos: true };
+  const storage = {
+    ultimoTipoDescarga: scene === 'emitidos' ? 'ambos' : 'xml', emitidosTodosLosTipos: true,
+    ivaCategoriasCustom: { 'RESTAURANTE': '4', 'COMERCIAL DEL VALLE S.A.': '4', 'OPTICA VISION': '3' }
+  };
   const responder = (valor, cb) => (cb ? (setTimeout(() => cb(valor), 0), undefined) : Promise.resolve(valor));
 
   window.chrome = {
@@ -84,7 +112,14 @@
       query: async () => [{ id: 1, url: 'https://srienlinea.sri.gob.ec/comprobantes-electronicos-internet/pages/consultas/recibidos/comprobantesRecibidos.jsf' }],
       get: async () => ({ id: 1, url: 'https://srienlinea.sri.gob.ec/sri-en-linea/inicio/NAT' }),
       sendMessage(id, msg, cb) {
-        return responder(msg.action === 'obtenerDocumentos' ? esc.docs : null, cb);
+        if (msg.action === 'obtenerDocumentos') return responder(esc.docs, cb);
+        // iva.js solo "esta" en la escena de devolucion de IVA. El log se
+        // entrega una vez: las consultas siguientes piden desde logDesde
+        if (scene === 'iva' && msg.action.startsWith('iva')) {
+          const desde = msg.logGen === estadoIva.logGen ? msg.logDesde : 0;
+          return responder({ ...estadoIva, logDesde: desde, log: logIva.slice(desde) }, cb);
+        }
+        return responder(null, cb);
       },
       update() {}
     },
@@ -96,14 +131,14 @@
         return responder(o, cb);
       },
       set(o) { Object.assign(storage, o); return Promise.resolve(); }
-    } },
+    }, onChanged: { addListener() {} } },
     downloads: { download() {} }
   };
 
   // Ajustes de la escena tras renderizar + aviso del alto al contenedor
   window.addEventListener('load', () => {
     setTimeout(() => {
-      if (scene === 'recibidos') document.querySelector('details.options-section').open = true;
+      if (scene === 'recibidos') document.querySelector('#contentArea details.options-section').open = true;
       if (scene === 'historial') { document.querySelector('[data-tab="historial"]').click(); document.getElementById('listaHistorial').style.maxHeight = '205px'; }
       setTimeout(() => {
         parent.postMessage({ popupAlto: document.documentElement.scrollHeight }, '*');

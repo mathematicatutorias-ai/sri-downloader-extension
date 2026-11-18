@@ -61,8 +61,9 @@ var SRI_CONFIG = {
     NAMESPACE: 'http://ec.gob.sri.ws.autorizacion',
   },
 
-  // Asistente de devolucion de IVA (personas con discapacidad). Lo usa iva.js
-  // (panel flotante en la pagina); no interviene en las descargas.
+  // Asistente de devolucion de IVA (adultos mayores / personas con
+  // discapacidad). Lo usan iva.js (trabaja sobre la pagina) y el popup (su
+  // interfaz); no interviene en las descargas.
   IVA: {
     // App de devoluciones (adultos mayores y discapacidad): iva.js solo se
     // carga en estas paginas (ver content_scripts del manifest)
@@ -73,6 +74,19 @@ var SRI_CONFIG = {
     BTN_PROCESAR: "[id$='btnGuardarFacturasSeleccionadas']",   // "Procesar facturas seleccionadas"
     COL_NOMBRE_COMERCIAL: 2,                                    // indice de celda con el nombre comercial
     COL_MONTO_IVA: 5,                                           // indice de celda con el IVA de la factura
+    // Pantalla "Facturas electronicas" (anio + periodo + Buscar), verificada
+    // en vivo en discapacidad (ids con sufijo DIS: cmbAnioDIS_input...). Los
+    // selectores van por fragmento para cubrir tambien adultos mayores
+    SELECT_ANIO: "select[id*='cmbAnio']",                       // select oculto del SelectOneMenu de anio
+    SELECT_PERIODO: "select[id*='cmbPeriodo']",                 // idem periodo (se llena por AJAX al elegir anio)
+    BTN_BUSCAR: "[id*='btnBuscarComprobantesElectronicos']",    // "Buscar"
+    // "Volver a intentar" de la pantalla "No se puede continuar con la carga
+    // de informacion" (en adultos mayores no tiene id fijo: iva.js lo busca
+    // tambien por texto)
+    BTN_VOLVER_ERROR: "[id$='btnPantallaAnterior']",
+    // Anios que revisa la busqueda automatica de periodos pendientes (los
+    // mas recientes); el resto se revisa a pedido desde el popup
+    ANIOS_BUSQUEDA: 2,
     // Values del select de tipo de gasto del SRI
     TIPOS_GASTO: { '1': 'Vestimenta', '2': 'Vivienda', '3': 'Salud', '4': 'Alimentacion', '5': 'Educacion' },
     // Acceso directo: Devoluciones > IVA - Personas con discapacidad

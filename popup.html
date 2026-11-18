@@ -40,6 +40,76 @@
     <div class="options-section" id="sriMenuContainer"></div>
   </div>
 
+  <!-- Asistente de devolucion de IVA: controla iva.js en la pagina del SRI -->
+  <div id="ivaArea" style="display: none;">
+    <div class="options-section">
+      <div class="sri-submenu-header">
+        <a class="sri-back-btn" id="ivaVolver" role="button" tabindex="0">&lsaquo; Accesos SRI</a>
+        <div class="sri-submenu-title">Asistente devolucion IVA</div>
+      </div>
+
+      <div id="ivaStatus" class="iva-status"></div>
+
+      <div id="ivaAcciones">
+        <button id="ivaBtnAuto" class="btn btn-primary" title="Rellena todas las paginas y, si ninguna factura queda sin tipo de gasto, procesa">
+          Auto: todas las paginas
+        </button>
+        <div class="iva-btn-row">
+          <button id="ivaBtnFill" class="btn btn-secondary">Rellenar esta pagina</button>
+          <button id="ivaBtnNext" class="btn btn-secondary">Siguiente pagina</button>
+        </div>
+      </div>
+      <button id="ivaBtnStop" class="btn btn-danger" style="display: none;">Detener</button>
+
+      <label class="radio-option iva-auto-label" id="ivaAutoProcesarWrap">
+        <input type="checkbox" id="ivaAutoProcesar" checked>
+        Procesar automaticamente al terminar el modo auto
+      </label>
+    </div>
+
+    <!-- Periodos: resultado de la busqueda de pendientes (pantalla de anio/periodo del SRI) -->
+    <div class="options-section" id="ivaPeriodosSection" style="display: none;">
+      <div class="iva-log-header">
+        <h3>Periodos pendientes</h3>
+        <button id="ivaBtnBuscar" class="btn-small" title="Consulta periodo por periodo, empezando por enero de este anio, hasta encontrar uno sin procesar">Buscar</button>
+      </div>
+      <div id="ivaPeriodosLista"></div>
+      <p id="ivaPeriodosResumen" class="iva-nota"></p>
+      <button id="ivaBtnBuscarTodos" class="btn-small iva-btn-ancho" style="display: none;">Buscar tambien en los anios anteriores</button>
+      <label class="radio-option iva-auto-label">
+        <input type="checkbox" id="ivaAutoBuscar" checked>
+        Buscar automaticamente al llegar a la pantalla de periodos
+      </label>
+    </div>
+
+    <div class="options-section" id="ivaLogSection" style="display: none;">
+      <div class="iva-log-header">
+        <h3>Registro</h3>
+        <button id="ivaBtnClear" class="btn-small">Limpiar</button>
+      </div>
+      <div id="ivaLog" class="iva-log"></div>
+    </div>
+
+    <details class="options-section" id="ivaCategorias">
+      <summary>Categorias personalizadas (<span id="ivaCatTotal">0</span>)</summary>
+      <p class="iva-nota">Al elegir a mano el tipo de gasto de un proveedor sin categoria, se guarda aqui automaticamente.</p>
+      <div class="iva-add-row">
+        <input type="text" id="ivaCatNombre" class="config-input" placeholder="Nombre comercial">
+        <select id="ivaCatTipo" class="config-input"></select>
+        <button id="ivaCatAgregar" class="btn-small" title="Agregar">+</button>
+      </div>
+      <div id="ivaCatLista" class="iva-cat-lista"></div>
+      <div class="iva-io-row">
+        <button id="ivaBtnExport" class="btn-small" title="Guardar las categorias personalizadas en un archivo">Exportar</button>
+        <button id="ivaBtnImport" class="btn-small" title="Agregar categorias desde un archivo JSON">Importar</button>
+        <input type="file" id="ivaArchivo" accept=".json,application/json" hidden>
+      </div>
+      <p id="ivaCatStatus" class="config-status"></p>
+    </details>
+
+    <p class="iva-aviso">Revise los datos antes de enviar: el contribuyente es responsable de lo presentado al SRI.</p>
+  </div>
+
   <div id="contentArea" style="display: none;">
     <!-- Progreso arriba (visible durante descarga) -->
     <div id="progressContainer" class="progress-container">
