@@ -15,6 +15,7 @@ Características principales:
 - Consulta automática: Al navegar a emitidos desde el menú, la extensión ejecuta la consulta por ti; no necesitas llenar el formulario.
 - Formatos: Elige entre XML, PDF o ambos (recuerda tu última selección).
 - Accesos directos SRI: Botones "Descargar recibidos" y "Descargar emitidos" con submenú por tipo de comprobante (Facturas, Retenciones, Notas de Crédito/Débito, Liquidaciones, Guías de Remisión), más navegación rápida a Declaraciones, RUC, Claves y otras secciones del portal. Pre-configura automáticamente el formulario.
+- Asistente de devolución de IVA (adultos mayores y personas con discapacidad): al consultar tus facturas, un panel en la página marca cada factura, rellena el IVA solicitado y asigna el tipo de gasto según el comercio. Con el modo automático recorre todas las páginas y procesa la solicitud solo si todas quedaron completas. Puedes agregar tus propios comercios. Revisa siempre los datos antes de enviar.
 - Entornos diferenciados por color: La interfaz cambia a verde agua cuando trabajas sobre emitidos y azul en recibidos, para que siempre sepas dónde estás.
 - Organización de archivos: Organiza las descargas en carpetas automáticamente (RUC/Año/Mes o Año/Mes/RUC), separando recibidos de emitidos, con 3 formatos de nombre de archivo y vista previa en tiempo real.
 - Progreso en tiempo real: Barra de progreso por documento (y por día en modo mes) con estimación de tiempo restante y badge en el ícono. Cancela en cualquier momento con "Detener Descarga".

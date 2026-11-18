@@ -23,6 +23,13 @@ let origenDetectado = 'recibidos';
  */
 let contentDisponible = false;
 
+/**
+ * @type {{hayTabla: boolean, panelAbierto: boolean, procesando: boolean}|null}
+ * Estado del asistente de devolucion de IVA (iva.js) en la tab activa;
+ * null si no es una pagina del SRI o el script no respondio
+ */
+let estadoIva = null;
+
 // =====================================================
 // Referencias a elementos del DOM del popup
 // =====================================================
@@ -403,18 +410,11 @@ async function cargarDocumentos() {
     await new Promise(r => setTimeout(r, 100));
 
     // Solicitar documentos al content script
-    chrome.tabs.sendMessage(tab.id, { action: 'obtenerDocumentos' }, (response) => {
-      // Error de comunicacion con content script
-      if (chrome.runtime.lastError) {
-        mostrarEstado('Navega y genera la consulta de los comprobantes para descargar.', 'info');
-        mostrarSriLinks();
-        return;
-      }
-
-      // Error reportado por el content script
-      if (response?.error) {
-        mostrarEstado('Navega y genera la consulta de los comprobantes para descargar.', 'info');
-        mostrarSriLinks();
+    chrome.tabs.sendMessage(tab.id, { action: 'obtenerDocumentos' }, async (response) => {
+      // Error de comunicacion con content script, o error reportado por el
+      // content script (no hay tabla de comprobantes): menu de accesos directos
+      if (chrome.runtime.lastError || response?.error) {
+        await mostrarSinTablaComprobantes(tab.id);
         return;
       }
 
@@ -448,8 +448,7 @@ async function cargarDocumentos() {
       // No hay documentos en la tabla actual. En emitidos se permite seguir:
       // el modo mes consulta dia por dia automaticamente (sin captcha)
       if (documentos.length === 0 && origenDetectado !== 'emitidos') {
-        mostrarEstado('Navega y genera la consulta de los comprobantes para descargar.', 'info');
-        mostrarSriLinks();
+        await mostrarSinTablaComprobantes(tab.id);
         return;
       }
 
@@ -473,6 +472,64 @@ async function cargarDocumentos() {
   } catch (error) {
     mostrarEstado(`Error: ${error.message}`, 'error');
   }
+}
+
+/**
+ * Pagina del SRI sin tabla de comprobantes: consulta el estado del asistente
+ * de IVA y muestra el menu de accesos directos (con el boton del asistente
+ * si la tabla de facturas de devolucion esta en pantalla).
+ * @param {number} tabId
+ */
+async function mostrarSinTablaComprobantes(tabId) {
+  estadoIva = await consultarEstadoIva(tabId);
+  if (estadoIva?.hayTabla) {
+    mostrarEstado('Facturas de devolucion de IVA detectadas. El asistente rellena el IVA solicitado y el tipo de gasto en la pagina.', 'info');
+  } else {
+    mostrarEstado('Navega y genera la consulta de los comprobantes para descargar.', 'info');
+  }
+  mostrarSriLinks();
+}
+
+/**
+ * Pregunta a iva.js por la tabla de facturas de devolucion. Si el script no
+ * responde (tab abierta antes de instalar/actualizar la extension) lo inyecta
+ * junto con su CSS y reintenta una vez.
+ * @param {number} tabId
+ * @returns {Promise<Object|null>} {hayTabla, panelAbierto, procesando} o null
+ */
+async function consultarEstadoIva(tabId) {
+  const preguntar = () => new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { action: 'ivaEstado' }, (response) => {
+      resolve(chrome.runtime.lastError || !response || 'error' in response ? null : response);
+    });
+  });
+
+  let estado = await preguntar();
+  if (estado) return estado;
+
+  try {
+    await chrome.scripting.insertCSS({ target: { tabId }, files: ['iva.css'] });
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['config.js', 'iva-categorias.js', 'iva.js']
+    });
+    estado = await preguntar();
+  } catch (e) {
+    // Pagina no inyectable: sin asistente
+  }
+  return estado;
+}
+
+/**
+ * Abre el panel del asistente de devolucion de IVA en la pagina y cierra el
+ * popup (el proceso corre en la pagina, no depende del popup).
+ */
+async function abrirAsistenteIva() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  chrome.tabs.sendMessage(tab.id, { action: 'ivaAbrirPanel' }, () => {
+    void chrome.runtime.lastError; // Sin receptor: nada que abrir
+    window.close();
+  });
 }
 
 // =====================================================
@@ -1418,6 +1475,13 @@ const SRI_MENU = [
     { nombre: 'Guias de Remision', esEmitidos: true, url: 'https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=60&idGrupo=58', tipoComprobante: '5' },
     { nombre: 'Comprobantes de Retencion', esEmitidos: true, url: 'https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=60&idGrupo=58', tipoComprobante: '6' },
   ]},
+  // Devolucion de IVA: cada opcion solo navega. Cuando en la pagina aparece
+  // la tabla de facturas (tblFacturas), iva.js abre solo el panel del
+  // asistente que rellena IVA solicitado + tipo de gasto
+  { nombre: 'Devolucion de IVA', primary: true, esIva: true, items: [
+    { nombre: 'Personas con discapacidad', url: 'https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=130&idGrupo=127' },
+    { nombre: 'Adultos mayores', url: 'https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=129&idGrupo=127' },
+  ]},
   { nombre: 'Claves', items: [
     { nombre: 'Cambiar clave', url: 'https://srienlinea.sri.gob.ec/sri-en-linea/SriClaves/Generacion/internet/actualizar' },
     { nombre: 'Crear y administrar usuarios', url: 'https://srienlinea.sri.gob.ec/sri-en-linea/SriClaves/UsuariosAdicionales/administracion' },
@@ -1500,12 +1564,23 @@ function renderSriMenu() {
   const container = document.getElementById('sriMenuContainer');
   container.innerHTML = '';
 
-  // Renderizar botones primarios destacados (Descargar recibidos / emitidos)
+  // En la pantalla de devolucion de IVA con la tabla de facturas: acceso al
+  // asistente (el panel se abre solo, esto sirve para reabrirlo si se cerro)
+  if (estadoIva?.hayTabla) {
+    const btnIva = document.createElement('a');
+    btnIva.className = 'sri-link sri-link-primary sri-link-iva sri-link-iva-activo';
+    btnIva.textContent = 'Abrir asistente de devolucion IVA';
+    btnIva.addEventListener('click', abrirAsistenteIva);
+    container.appendChild(btnIva);
+  }
+
+  // Renderizar botones primarios destacados (recibidos / emitidos / IVA)
   SRI_MENU.filter(m => m.primary).forEach(primary => {
     const btn = document.createElement('a');
     btn.className = 'sri-link sri-link-primary';
     btn.textContent = primary.nombre;
     if (primary.esEmitidos) btn.classList.add('sri-link-emitidos');
+    if (primary.esIva) btn.classList.add('sri-link-iva');
     if (primary.items) {
       btn.addEventListener('click', () => renderSriSubmenu(primary));
     } else if (primary.esEmitidos) {

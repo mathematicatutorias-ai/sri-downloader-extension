@@ -3,8 +3,9 @@
 ## Proyecto
 Extension de Chrome (Manifest V3) para descargar documentos XML/PDF del SRI Ecuador,
 tanto comprobantes RECIBIDOS como EMITIDOS. Organiza archivos en carpetas
-configurables y ofrece accesos directos al portal SRI.
-Version: 1.5.2 | Dominio: `srienlinea.sri.gob.ec` (+ WS `cel.sri.gob.ec`)
+configurables, ofrece accesos directos al portal SRI e incluye un asistente
+para la devolucion de IVA (adultos mayores / personas con discapacidad).
+Version: 1.6.0 | Dominio: `srienlinea.sri.gob.ec` (+ WS `cel.sri.gob.ec`)
 
 ## Estructura de archivos
 ```
@@ -13,6 +14,9 @@ sri-downloader-extension/
 ├── config.js          # Constantes compartidas (delays, selectores, timeouts, organizacion)
 ├── background.js      # Service Worker - descargas, organizacion archivos, navegacion SRI
 ├── content.js         # Content Script - extractor de datos DOM (~120 lineas)
+├── iva.js             # Content Script - panel asistente devolucion de IVA
+├── iva.css            # Estilos del panel IVA (inyectado en la pagina del SRI)
+├── iva-categorias.js  # Categorias base nombre comercial -> tipo de gasto
 ├── popup.html         # UI del popup (4 tabs + accesos directos SRI + modal)
 ├── popup.js           # Logica del popup (menu SRI, config, organizacion, historial)
 ├── popup.css          # Estilos (light + dark mode + tema verde agua emitidos)
@@ -28,7 +32,7 @@ sri-downloader-extension/
 - Ver logs background: `chrome://extensions/` > "Service worker" > click para inspeccionar
 - Ver logs pagina: F12 en la pagina del SRI
 - Empaquetar para la Web Store (PowerShell):
-  `Compress-Archive -Path manifest.json, background.js, config.js, content.js, popup.html, popup.js, popup.css, icons -DestinationPath "dist\sri-downloader-vX.Y.Z.zip" -Force`
+  `Compress-Archive -Path manifest.json, background.js, config.js, content.js, iva.js, iva.css, iva-categorias.js, popup.html, popup.js, popup.css, icons -DestinationPath "dist\sri-downloader-vX.Y.Z.zip" -Force`
 
 ## Arquitectura clave
 
@@ -155,6 +159,31 @@ sri-downloader-extension/
 - Tiene guard `window.SRI_DOWNLOADER_LOADED` para evitar reinyeccion
 - No ejecuta descargas (eso lo hace background)
 
+### Asistente devolucion de IVA - `iva.js` / `iva.css` / `iva-categorias.js`
+- Portado de la extension `autofill_devolucioniva` (github.com/rolansor/autofill_devolucioniva)
+- Content script en todas las paginas del SRI (tras config.js + iva-categorias.js);
+  guard `window.SRI_IVA_LOADED`. Selectores en `SRI_CONFIG.IVA`
+- Popup: apartado primario "Devolucion de IVA" (morado) con SOLO dos opciones:
+  Personas con discapacidad (`redireccion=130`) y Adultos mayores (`redireccion=129`).
+  Solo navegan; no hay logica de background
+- La app de discapacidad cae en `devolucionTerceraEdad-internet/pages/personasDiscapacidad/
+  procesarPersonasDiscapacidad.jsf`: pantalla de condiciones (Si/No) -> seleccion de
+  cuenta bancaria de acreditacion -> periodo -> tabla de facturas
+- El panel se abre SOLO cuando aparece `[id$='tblFacturas_data']` (MutationObserver con
+  debounce 500 ms; la consulta es AJAX). Si el usuario lo cierra (x) no se reabre solo
+  en esa pagina; el popup muestra "Abrir asistente de devolucion IVA" cuando hay tabla
+- Por fila: click en `.ui-chkbox-box`, `txtIvaSolicitado` = IVA de la celda 5, tipo de
+  gasto via trigger del SelectOneMenu + click en `li` (fallback: select oculto + label)
+- Categoria por `includes()` del nombre comercial (celda 2): personalizadas
+  (`chrome.storage.local.ivaCategoriasCustom`) primero, luego `IVA_CATEGORIAS_BASE`
+- Modo auto: pagina 1 -> todas; si 0 incompletas pulsa `btnGuardarFacturasSeleccionadas`
+  (envio al SRI), si hay incompletas avisa y NO envia
+- Cambio de pagina: marca la primera fila y espera a que se reemplace (o cambie el
+  texto del paginador), luego 1500 ms de margen
+- Las categorias personalizadas de la extension vieja NO se migran (otro storage)
+- Probado con tabla simulada; el selector de la tabla en adultos mayores no se ha
+  verificado en vivo (se asume la misma app `devolucionTerceraEdad-internet`)
+
 ## Mensajes entre componentes
 
 ### Popup -> Background
@@ -176,7 +205,12 @@ sri-downloader-extension/
 ### Popup -> Content Script
 | Mensaje | Descripcion |
 |---------|-------------|
-| `obtenerDocumentos` | Extrae documentos de la tabla actual |
+| `obtenerDocumentos` | Extrae documentos de la tabla actual (content.js) |
+| `ivaEstado` | `{hayTabla, panelAbierto, procesando}` del asistente IVA (iva.js) |
+| `ivaAbrirPanel` | Abre el panel del asistente IVA en la pagina (iva.js) |
+
+Cada listener responde SOLO a sus acciones: responder error a acciones ajenas
+pisaria la respuesta del otro content script.
 
 ### Background -> Popup
 | Mensaje | Descripcion |
@@ -397,8 +431,8 @@ document.getElementById(linkId).click();
 
 ### Que se sube
 Un ZIP con SOLO los archivos de la extension (nunca el repo entero):
-`manifest.json`, `background.js`, `config.js`, `content.js`, `popup.html`,
-`popup.js`, `popup.css` e `icons/`. Excluir: `docs/`, `dist/`, `README.md`,
+`manifest.json`, `background.js`, `config.js`, `content.js`, `iva.js`,
+`iva.css`, `iva-categorias.js`, `popup.html`, `popup.js`, `popup.css` e `icons/`. Excluir: `docs/`, `dist/`, `README.md`,
 `CLAUDE.md`, `.git`. Generar con el comando de empaquetar de "Comandos utiles";
 queda en `dist/sri-downloader-vX.Y.Z.zip` (carpeta gitignored).
 

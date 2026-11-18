@@ -114,9 +114,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const datos = obtenerFilasTabla();
     const paginacion = obtenerPaginacion();
     sendResponse({ ...datos, paginacion });
-  } else {
-    sendResponse({ error: 'Accion no reconocida' });
   }
+  // Otras acciones (ej. ivaEstado / ivaAbrirPanel de iva.js) no se responden
+  // aqui: responder con error pisaria la respuesta del otro listener
   return false;
 });
 

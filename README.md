@@ -41,6 +41,16 @@ tanto comprobantes **recibidos** como **emitidos**.
   el dia 1 del mes (emitidos) y el tipo de comprobante automaticamente
 - **13 categorias**: Claves, RUC, Facturacion Electronica, Declaraciones, Anexos, Pagos, Deudas, Devoluciones, Certificados, Vehiculos, Tramites y mas
 
+### Asistente de devolucion de IVA
+- **Apartado "Devolucion de IVA"** en el menu: lleva a Adultos mayores o Personas con discapacidad
+- **Panel en la pagina**: se abre solo cuando aparece la tabla de facturas de la devolucion
+- **Por factura**: marca el checkbox, rellena el "IVA solicitado" con el IVA completo y asigna
+  el tipo de gasto (Vestimenta, Vivienda, Salud, Alimentacion, Educacion) segun el nombre comercial
+- **Modo automatico**: recorre todas las paginas; si todas quedaron con tipo de gasto pulsa
+  "Procesar facturas seleccionadas", si no avisa cuantas faltan completar a mano
+- **Categorias personalizadas**: agrega nombres comerciales propios (tienen prioridad sobre las base)
+- Es una ayuda: el contribuyente debe revisar los datos antes de enviarlos al SRI
+
 ### Organizacion de archivos
 - **Carpetas automaticas**: Organiza descargas en estructura de carpetas configurable
 - **Orden configurable**: RUC/Anio/Mes o Anio/Mes/RUC
@@ -118,6 +128,7 @@ tanto comprobantes **recibidos** como **emitidos**.
 - **Background (Service Worker)**: Orquesta descargas, reintentos, organizacion de archivos, navegacion SRI
 - **Popup**: Interfaz con 4 tabs, accesos directos SRI, progreso, configuracion
 - **Content Script**: Extrae datos de la tabla del SRI (solo lectura, ~120 lineas)
+- **Asistente IVA** (`iva.js` + `iva.css` + `iva-categorias.js`): panel flotante de devolucion de IVA
 
 ## Permisos
 

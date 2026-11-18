@@ -47,6 +47,21 @@ var SRI_CONFIG = {
     NAMESPACE: 'http://ec.gob.sri.ws.autorizacion',
   },
 
+  // Asistente de devolucion de IVA (personas con discapacidad). Lo usa iva.js
+  // (panel flotante en la pagina); no interviene en las descargas.
+  IVA: {
+    TABLA_FACTURAS: "[id$='tblFacturas_data']",                 // tbody de la tabla de facturas
+    INPUT_IVA_SOLICITADO: "input[id$='txtIvaSolicitado']",     // input "IVA solicitado" por fila
+    SELECT_TIPO_GASTO: "select[id$='cmbTipoGasto_input']",     // select oculto del SelectOneMenu PrimeFaces
+    BTN_PROCESAR: "[id$='btnGuardarFacturasSeleccionadas']",   // "Procesar facturas seleccionadas"
+    COL_NOMBRE_COMERCIAL: 2,                                    // indice de celda con el nombre comercial
+    COL_MONTO_IVA: 5,                                           // indice de celda con el IVA de la factura
+    // Values del select de tipo de gasto del SRI
+    TIPOS_GASTO: { '1': 'Vestimenta', '2': 'Vivienda', '3': 'Salud', '4': 'Alimentacion', '5': 'Educacion' },
+    // Acceso directo: Devoluciones > IVA - Personas con discapacidad
+    URL: 'https://srienlinea.sri.gob.ec/tuportal-internet/accederAplicacion.jspa?redireccion=130&idGrupo=127',
+  },
+
   // Dominio para filtrar descargas
   DOMINIO_SRI: 'sri.gob.ec',
 
